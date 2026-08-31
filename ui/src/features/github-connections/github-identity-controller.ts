@@ -5,14 +5,13 @@ import type {
 } from "../../../../packages/gateway-protocol/src/schema/users.ts";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type { ToolsGitHubStatusResult } from "../../api/types.ts";
+import { showConfirmDialog } from "../../components/confirm-dialog.ts";
 import { t } from "../../i18n/index.ts";
 import { resolveAgentConfig } from "../../lib/agents/display.ts";
+import type { RuntimeConfigCapability } from "../../lib/config/runtime-config-capability.ts";
 import { formatUiError } from "../../lib/format-error.ts";
+import { generateUUID } from "../../lib/uuid.ts";
 import { GitHubDeviceAuthorizationController } from "./github-identity-controller-authorization.ts";
-import {
-  runGitHubIdentityConfigure,
-  runGitHubIdentityInherit,
-} from "./github-identity-controller-mutations.ts";
 import {
   configFingerprint,
   githubConnectionOwnerKey,
@@ -21,7 +20,6 @@ import {
   type GitHubIdentityDraft,
   type GitHubIdentityHost,
   type GitHubIdentityScope,
-  type GitHubSharedScope,
   type RequestOwner,
   type SharedRequestOwner,
 } from "./github-identity-controller-shared.ts";
@@ -51,12 +49,9 @@ export class GitHubIdentityController {
   private mutationOwner: RequestOwner | null = null;
   private mutationIdentityChanged = false;
   private readonly deviceAuthorization: GitHubDeviceAuthorizationController;
-  private drafts: Record<GitHubSharedScope, GitHubIdentityDraft> = {
-    system: readGitHubIdentityDraft(undefined),
-    agent: readGitHubIdentityDraft(undefined),
-  };
-  private draftDirty = { system: false, agent: false };
-  private configFingerprints = { system: "", agent: "" };
+  private selectedDraft = readGitHubIdentityDraft(undefined);
+  private draftDirty = false;
+  private configFingerprint = "";
 
   constructor(private readonly host: GitHubIdentityHost) {
     this.deviceAuthorization = new GitHubDeviceAuthorizationController({
@@ -71,7 +66,7 @@ export class GitHubIdentityController {
           this.applyMutationStatus(
             { ...owner, target: owner.target },
             result.githubStatus,
-            { ...this.drafts[owner.target.scope], token: "" },
+            { ...this.selectedDraft, token: "" },
             refreshError,
           );
         } else {
@@ -94,7 +89,7 @@ export class GitHubIdentityController {
     return this.connected && this.client !== null;
   }
   get draft(): GitHubIdentityDraft {
-    return this.scope === "personal" ? readGitHubIdentityDraft(undefined) : this.drafts[this.scope];
+    return this.scope === "personal" ? readGitHubIdentityDraft(undefined) : this.selectedDraft;
   }
 
   private queueVerification() {
@@ -190,24 +185,19 @@ export class GitHubIdentityController {
       this.patVisible = false;
       this.confirmationPending = false;
     }
-    if (clientChanged || ownerChanged) {
-      this.drafts = {
-        system: readGitHubIdentityDraft(values.system),
-        agent: readGitHubIdentityDraft(values.agent),
-      };
-      this.draftDirty = { system: false, agent: false };
-      this.configFingerprints = {
-        system: configFingerprint(values.system),
-        agent: configFingerprint(values.agent),
-      };
-      return;
-    }
-    for (const scope of ["system", "agent"] as const) {
-      const scopeFingerprint = configFingerprint(values[scope]);
-      if (!this.draftDirty[scope] && this.configFingerprints[scope] !== scopeFingerprint) {
-        this.drafts = { ...this.drafts, [scope]: readGitHubIdentityDraft(values[scope]) };
-        this.configFingerprints = { ...this.configFingerprints, [scope]: scopeFingerprint };
+    const selected = nextScope === "personal" ? undefined : values[nextScope];
+    const selectedFingerprint = configFingerprint(selected);
+    if (clientChanged || ownerChanged || scopeChanged) {
+      this.selectedDraft = readGitHubIdentityDraft(selected);
+      this.draftDirty = false;
+      this.configFingerprint = selectedFingerprint;
+      if (clientChanged || ownerChanged) {
+        return;
       }
+    }
+    if (!this.draftDirty && this.configFingerprint !== selectedFingerprint) {
+      this.selectedDraft = readGitHubIdentityDraft(selected);
+      this.configFingerprint = selectedFingerprint;
     }
     if (identityChanged && !mutationOwnsIdentityChange) {
       this.queueVerification();
@@ -239,8 +229,8 @@ export class GitHubIdentityController {
     if (this.scope === "personal") {
       return;
     }
-    this.drafts = { ...this.drafts, [this.scope]: { ...this.drafts[this.scope], [field]: value } };
-    this.draftDirty = { ...this.draftDirty, [this.scope]: true };
+    this.selectedDraft = { ...this.selectedDraft, [field]: value };
+    this.draftDirty = true;
     this.host.requestUpdate();
   }
 
@@ -256,10 +246,7 @@ export class GitHubIdentityController {
     this.loading = false;
     this.busy = false;
     this.mutationOwner = null;
-    this.drafts = {
-      system: readGitHubIdentityDraft(undefined),
-      agent: readGitHubIdentityDraft(undefined),
-    };
+    this.selectedDraft = readGitHubIdentityDraft(undefined);
   };
 
   private captureRequest(): RequestOwner | null {
@@ -351,9 +338,8 @@ export class GitHubIdentityController {
       return;
     }
     this.acceptSharedStatus(owner, status);
-    const scope = owner.target.scope;
-    this.drafts = { ...this.drafts, [scope]: nextDraft };
-    this.draftDirty = { ...this.draftDirty, [scope]: false };
+    this.selectedDraft = nextDraft;
+    this.draftDirty = false;
     this.tokenRevealed = false;
     this.patVisible = false;
     this.error = refreshError
@@ -464,11 +450,65 @@ export class GitHubIdentityController {
       this.host.requestUpdate();
       return;
     }
-    const mutation = this.createMutationOwner();
-    if (mutation) {
-      await runGitHubIdentityConfigure({ ...mutation, draft });
+    const captured = this.captureRequest();
+    const runExternalMutation = this.host.runExternalMutation;
+    if (!captured || captured.target.kind !== "shared" || !runExternalMutation) {
+      return;
+    }
+    const owner = { ...captured, target: captured.target };
+    const name = draft.name.trim();
+    const email = draft.email.trim();
+    this.beginMutation(owner);
+    let stored = false;
+    let secretName = "";
+    let succeeded = false;
+    const deleteSetupHandoff = () =>
+      owner.client.request("secrets.store.delete", { name: secretName }).catch(() => undefined);
+    try {
+      secretName = `github-setup-${generateUUID().replaceAll("-", "").toLowerCase()}`;
+      await owner.client.request("secrets.store.set", {
+        name: secretName,
+        value: draft.token,
+        kind: "secret",
+        allowedHosts: [],
+      });
+      stored = true;
+      if (!this.isCurrent(owner)) {
+        await deleteSetupHandoff();
+        return;
+      }
+      const result = await this.runConfigureMutation(owner, runExternalMutation, {
+        scope: owner.target.scope,
+        agentId: owner.target.agentId,
+        mode: "managed",
+        secretName,
+        ...(name || email
+          ? { gitAuthor: { ...(name ? { name } : {}), ...(email ? { email } : {}) } }
+          : {}),
+      });
+      if (!result.ok) {
+        throw new Error(result.error);
+      }
+      stored = false;
+      this.applyMutationStatus(
+        owner,
+        result.value,
+        { ...draft, token: "" },
+        result.refresh.ok ? null : result.refresh.error,
+      );
+      succeeded = true;
+    } catch (error) {
+      if (stored) {
+        await deleteSetupHandoff();
+      }
+      if (this.isCurrent(owner)) {
+        this.error = formatUiError(error);
+      }
+    } finally {
+      this.finishMutation(owner, succeeded);
     }
   }
+
   async inherit() {
     if (
       this.target?.kind !== "shared" ||
@@ -479,42 +519,88 @@ export class GitHubIdentityController {
     ) {
       return;
     }
-    const mutation = this.createMutationOwner();
-    if (!mutation) {
+    const captured = this.captureRequest();
+    const runExternalMutation = this.host.runExternalMutation;
+    if (!captured || captured.target.kind !== "shared" || !runExternalMutation) {
       return;
     }
-    await runGitHubIdentityInherit({
-      ...mutation,
-      canContinue: () => this.configurable && !this.busy && !this.authorizationActive,
-      setConfirmationPending: (pending) => {
-        if (mutation.isCurrent()) {
-          this.confirmationPending = pending;
-        }
-      },
-    });
-  }
-  private createMutationOwner() {
-    const owner = this.captureRequest();
-    if (!owner || owner.target.kind !== "shared" || !this.host.runExternalMutation) {
-      return null;
+    const owner = { ...captured, target: captured.target };
+    const scope = owner.target.scope;
+    this.confirmationPending = true;
+    let confirmed = false;
+    try {
+      confirmed = await showConfirmDialog({
+        title:
+          scope === "agent"
+            ? t("agentTools.githubUseSystemConfirmTitle")
+            : t("agentTools.githubUseNativeConfirmTitle"),
+        message:
+          scope === "agent"
+            ? t("agentTools.githubUseSystemConfirmMessage")
+            : t("agentTools.githubUseNativeConfirmMessage"),
+        confirmLabel:
+          scope === "agent"
+            ? t("agentTools.githubUseSystemNewRuns")
+            : t("agentTools.githubUseNativeNewRuns"),
+      });
+    } finally {
+      if (this.isCurrent(owner)) {
+        this.confirmationPending = false;
+      }
     }
-    const sharedOwner = { ...owner, target: owner.target };
-    return {
-      owner: sharedOwner,
-      scope: owner.target.scope,
-      isCurrent: () => this.isCurrent(owner),
-      isConfigurable: () => this.configurable,
-      runExternalMutation: this.host.runExternalMutation,
-      begin: () => this.beginMutation(sharedOwner),
-      applyStatus: (
-        status: ToolsGitHubStatusResult,
-        draft: GitHubIdentityDraft,
-        error: string | null,
-      ) => this.applyMutationStatus(sharedOwner, status, draft, error),
-      finish: (succeeded: boolean) => this.finishMutation(sharedOwner, succeeded),
-      setError: (error: string) => {
-        this.error = error;
+    if (
+      !confirmed ||
+      !this.isCurrent(owner) ||
+      !this.configurable ||
+      this.busy ||
+      this.authorizationActive
+    ) {
+      return;
+    }
+    this.beginMutation(owner);
+    let succeeded = false;
+    try {
+      const result = await this.runConfigureMutation(owner, runExternalMutation, {
+        scope,
+        agentId: owner.target.agentId,
+        mode: "inherit",
+      });
+      if (!result.ok) {
+        throw new Error(result.error);
+      }
+      if (this.isCurrent(owner)) {
+        this.applyMutationStatus(
+          owner,
+          result.value,
+          { token: "", name: "", email: "" },
+          result.refresh.ok ? null : result.refresh.error,
+        );
+        succeeded = true;
+      }
+    } catch (error) {
+      if (this.isCurrent(owner)) {
+        this.error = formatUiError(error);
+      }
+    } finally {
+      this.finishMutation(owner, succeeded);
+    }
+  }
+  private runConfigureMutation(
+    owner: SharedRequestOwner,
+    runExternalMutation: RuntimeConfigCapability["runExternalMutation"],
+    params: Record<string, unknown>,
+  ) {
+    return runExternalMutation(
+      (client) => {
+        if (client !== owner.client) {
+          throw new Error("Connection changed before the GitHub identity update started.");
+        }
+        return client.request<ToolsGitHubStatusResult>("tools.github.configure", params);
       },
-    };
+      {
+        canDispatch: () => this.isCurrent(owner) && this.configurable,
+        dispatchError: "Access changed before the GitHub identity update started.",
+      },
+    );
   }
 }

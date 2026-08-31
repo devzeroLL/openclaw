@@ -24,56 +24,47 @@ export function renderGitHubPublicationAction(publication: GitHubPublicationView
       ${t("chat.pullRequests.openPublishedPr")}
     </a>`;
   }
+  let action: { click: (() => void) | undefined; label: string; disabled: boolean };
   if (result?.status === "failed") {
-    return publication.onNewAction
-      ? html`<button
-          class="chat-pr__create"
-          type="button"
-          ?disabled=${busy}
-          @click=${publication.onNewAction}
-        >
-          ${t("githubPublication.newAction")}
-        </button>`
-      : nothing;
+    action = {
+      click: publication.onNewAction,
+      label: t("githubPublication.newAction"),
+      disabled: busy,
+    };
+  } else if (result?.status === "needs_confirmation") {
+    action = {
+      click: publication.onConfirm,
+      label: t("githubPublication.confirm"),
+      disabled: busy || !publication.personalReady,
+    };
+  } else if (result?.status === "publishing" || result?.status === "requested") {
+    action = {
+      click:
+        result.publisher?.source === "personal" ? publication.onRefresh : publication.onPublish,
+      label: busy ? t("chat.pullRequests.publishing") : t("githubPublication.check"),
+      disabled: busy,
+    };
+  } else {
+    action = {
+      click: publication.onPublish,
+      disabled:
+        busy || !selection || (selection.source === "personal" && !publication.personalReady),
+      label: busy
+        ? t("chat.pullRequests.publishing")
+        : publication.locked
+          ? t("chat.pullRequests.retryPublication")
+          : t("chat.pullRequests.publishPr"),
+    };
   }
-  if (result?.status === "needs_confirmation") {
-    return publication.onConfirm
-      ? html`<button
-          class="chat-pr__create"
-          type="button"
-          ?disabled=${busy || !publication.personalReady}
-          @click=${publication.onConfirm}
-        >
-          ${t("githubPublication.confirm")}
-        </button>`
-      : nothing;
-  }
-  if (result?.status === "publishing" || result?.status === "requested") {
-    return html`<button
-      class="chat-pr__create"
-      type="button"
-      ?disabled=${busy}
-      @click=${result.publisher?.source === "personal"
-        ? publication.onRefresh
-        : publication.onPublish}
-    >
-      ${busy ? t("chat.pullRequests.publishing") : t("githubPublication.check")}
-    </button>`;
-  }
-  return publication.onPublish
+  // Accepted shared requests retain their status button even when no replay callback is available.
+  return action.click || result?.status === "publishing" || result?.status === "requested"
     ? html`<button
         class="chat-pr__create"
         type="button"
-        ?disabled=${busy ||
-        !selection ||
-        (selection.source === "personal" && !publication.personalReady)}
-        @click=${publication.onPublish}
+        ?disabled=${action.disabled}
+        @click=${action.click}
       >
-        ${busy
-          ? t("chat.pullRequests.publishing")
-          : publication.locked
-            ? t("chat.pullRequests.retryPublication")
-            : t("chat.pullRequests.publishPr")}
+        ${action.label}
       </button>`
     : nothing;
 }

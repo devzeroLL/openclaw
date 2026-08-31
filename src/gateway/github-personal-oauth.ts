@@ -19,6 +19,7 @@ import {
   resolveManagedGitHubProfileRoot,
 } from "../agents/github-tool-identity.js";
 import { hasErrnoCode } from "../infra/errno.js";
+import { getOrCreatePromise } from "../shared/lazy-promise.js";
 import { withOpenClawStateLease } from "../state/openclaw-state-lease.js";
 import {
   disconnectedUserGitHubConnection,
@@ -191,32 +192,26 @@ export function createPersonalGitHubOAuthLifecycle() {
     }
   };
   const retire = async (id: string) => {
-    const existing = cleanups.get(id);
-    if (existing) {
-      return await existing;
-    }
-    const cleanup = withProfileLease(id, async (assertOwned) => {
-      assertOwned();
-      if (profileIsReferenced(id)) {
-        return;
-      }
-      await removeManagedGitHubProfile(profileDir(id));
-    }).then(
-      () => {
-        retirements.delete(id);
-      },
-      () => {
-        retirements.add(id);
-      },
+    await getOrCreatePromise(
+      cleanups,
+      id,
+      () =>
+        withProfileLease(id, async (assertOwned) => {
+          assertOwned();
+          if (profileIsReferenced(id)) {
+            return;
+          }
+          await removeManagedGitHubProfile(profileDir(id));
+        }).then(
+          () => {
+            retirements.delete(id);
+          },
+          () => {
+            retirements.add(id);
+          },
+        ),
+      { evictOnSettled: true },
     );
-    cleanups.set(id, cleanup);
-    try {
-      await cleanup;
-    } finally {
-      if (cleanups.get(id) === cleanup) {
-        cleanups.delete(id);
-      }
-    }
   };
   const unobserve = observeUserGitHubProfileRetirement((ids) => {
     for (const id of ids) {
@@ -427,103 +422,97 @@ export function createPersonalGitHubOAuthLifecycle() {
       return;
     }
     const id = initial.profileId;
-    const existing = refreshes.get(id);
-    if (existing) {
-      return await existing;
-    }
-    const operation = withProfileLease(id, async (assertOwned) => {
-      const memory = rotated.get(id);
-      if (memory) {
-        if (!persistRotation(memory)) {
-          rotated.delete(id);
-          return;
-        }
-        rotated.delete(id);
-      }
-      const record = readUserGitHubConnection(owner);
-      const selection = record?.selection;
-      if (!record || selection?.kind !== "connected" || selection.profileId !== id) {
-        return;
-      }
-      if (selection.refresh?.tokens) {
-        await materializeRefresh(owner, id, selection.refresh.operationId, assertOwned);
-        return;
-      }
-      if (
-        selection.refreshFailure === "expired" ||
-        selection.refreshExpiresAtMs <= Date.now() ||
-        (!selection.refresh && selection.accessExpiresAtMs > Date.now() + 600000)
-      ) {
-        return;
-      }
-      const operationId = selection.refresh?.operationId ?? randomUUID();
-      updateUserGitHubConnection(
-        owner,
-        (current) => {
-          if (
-            current?.generation !== record.generation ||
-            current.selection.kind !== "connected" ||
-            current.selection.profileId !== id
-          ) {
-            throw new Error("My GitHub selection changed.");
+    await getOrCreatePromise(
+      refreshes,
+      id,
+      () =>
+        withProfileLease(id, async (assertOwned) => {
+          const memory = rotated.get(id);
+          if (memory) {
+            if (!persistRotation(memory)) {
+              rotated.delete(id);
+              return;
+            }
+            rotated.delete(id);
           }
-          return { ...current, selection: { ...current.selection, refresh: { operationId } } };
-        },
-        assertOwned,
-      );
-      let result;
-      try {
-        // Refresh rotates remote credentials: shutdown drains this bounded exchange, never aborts it.
-        result = await refreshGitHubOAuthToken({
-          refreshToken: selection.refreshToken,
-        });
-      } catch {
-        updateUserGitHubRefresh({
-          owner,
-          profileId: id,
-          operationId,
-          update: (current) => ({ ...current, refresh: undefined, refreshFailure: "failed" }),
-        });
-        return;
-      }
-      if (result.status === "error") {
-        updateUserGitHubRefresh({
-          owner,
-          profileId: id,
-          operationId,
-          update: (current) => ({
-            ...current,
-            refresh: undefined,
-            refreshFailure: result.code === "bad_refresh_token" ? "expired" : "failed",
-          }),
-        });
-        return;
-      }
-      // Persist remote rotation even if the initiating request closed or its profile merged.
-      // The exact operation CAS fences disconnect/replacement; memory retries use that same CAS.
-      const pending = {
-        owner,
-        profileId: id,
-        operationId,
-        tokens: result.tokens,
-        receivedAtMs: Date.now(),
-      };
-      rotated.set(id, pending);
-      if (!persistRotation(pending)) {
-        rotated.delete(id);
-        return;
-      }
-      rotated.delete(id);
-      await materializeRefresh(owner, id, operationId, assertOwned);
-    });
-    refreshes.set(id, operation);
-    try {
-      await operation;
-    } finally {
-      if (refreshes.get(id) === operation) {
-        refreshes.delete(id);
-      }
-    }
+          const record = readUserGitHubConnection(owner);
+          const selection = record?.selection;
+          if (!record || selection?.kind !== "connected" || selection.profileId !== id) {
+            return;
+          }
+          if (selection.refresh?.tokens) {
+            await materializeRefresh(owner, id, selection.refresh.operationId, assertOwned);
+            return;
+          }
+          if (
+            selection.refreshFailure === "expired" ||
+            selection.refreshExpiresAtMs <= Date.now() ||
+            (!selection.refresh && selection.accessExpiresAtMs > Date.now() + 600000)
+          ) {
+            return;
+          }
+          const operationId = selection.refresh?.operationId ?? randomUUID();
+          updateUserGitHubConnection(
+            owner,
+            (current) => {
+              if (
+                current?.generation !== record.generation ||
+                current.selection.kind !== "connected" ||
+                current.selection.profileId !== id
+              ) {
+                throw new Error("My GitHub selection changed.");
+              }
+              return { ...current, selection: { ...current.selection, refresh: { operationId } } };
+            },
+            assertOwned,
+          );
+          let result;
+          try {
+            // Refresh rotates remote credentials: shutdown drains this bounded exchange, never aborts it.
+            result = await refreshGitHubOAuthToken({
+              refreshToken: selection.refreshToken,
+            });
+          } catch {
+            updateUserGitHubRefresh({
+              owner,
+              profileId: id,
+              operationId,
+              update: (current) => ({ ...current, refresh: undefined, refreshFailure: "failed" }),
+            });
+            return;
+          }
+          if (result.status === "error") {
+            updateUserGitHubRefresh({
+              owner,
+              profileId: id,
+              operationId,
+              update: (current) => ({
+                ...current,
+                refresh: undefined,
+                refreshFailure: result.code === "bad_refresh_token" ? "expired" : "failed",
+              }),
+            });
+            return;
+          }
+          // Persist remote rotation even if the initiating request closed or its profile merged.
+          // The exact operation CAS fences disconnect/replacement; memory retries use that same CAS.
+          const pending = {
+            owner,
+            profileId: id,
+            operationId,
+            tokens: result.tokens,
+            receivedAtMs: Date.now(),
+          };
+          rotated.set(id, pending);
+          if (!persistRotation(pending)) {
+            rotated.delete(id);
+            return;
+          }
+          rotated.delete(id);
+          await materializeRefresh(owner, id, operationId, assertOwned);
+        }),
+      { evictOnSettled: true },
+    );
   };
 
   let maintenance: Promise<void> | undefined;
@@ -628,20 +617,14 @@ export function createPersonalGitHubOAuthLifecycle() {
         return { status: "expired" };
       }
       const key = `${action.owner}\0${requestId}`;
-      let operation = polls.get(key);
-      if (!operation) {
-        operation = pollOnce(action, current, requestId);
-        polls.set(key, operation);
-      }
-      try {
-        const result = await operation;
-        guard(action);
-        return result;
-      } finally {
-        if (polls.get(key) === operation) {
-          polls.delete(key);
-        }
-      }
+      const result = await getOrCreatePromise(
+        polls,
+        key,
+        () => pollOnce(action, current, requestId),
+        { evictOnSettled: true },
+      );
+      guard(action);
+      return result;
     },
     cancelAuthorization(action: PersonalGitHubAction, requestId: string): boolean {
       guard(action);

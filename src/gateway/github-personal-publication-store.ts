@@ -217,7 +217,7 @@ export function claimPersonalGitHubPublication(
         ) {
           throw new Error("My GitHub publication receipt changed during execution.");
         }
-        const updated = executeSqliteQuerySync(
+        const updated = executeSqliteQueryTakeFirstSync(
           db,
           query(db)
             .updateTable(table)
@@ -226,19 +226,13 @@ export function claimPersonalGitHubPublication(
             .where("request_id", "=", row.request_id)
             .where("status", "=", "publishing")
             .where("gateway_instance_id", "=", instanceId)
-            .where("execution_id", "=", executionId),
+            .where("execution_id", "=", executionId)
+            .returningAll(),
         );
-        if (updated.numAffectedRows !== 1n) {
+        if (!updated) {
           throw new Error("My GitHub publication execution is no longer current.");
         }
-        return executeSqliteQueryTakeFirstSync(
-          db,
-          query(db)
-            .selectFrom(table)
-            .selectAll()
-            .where("owner_profile_id", "=", row.owner_profile_id)
-            .where("request_id", "=", row.request_id),
-        )!;
+        return updated;
       },
       undefined,
       { operationLabel: "github-personal-publication.record" },

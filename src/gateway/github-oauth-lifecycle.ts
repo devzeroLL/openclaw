@@ -41,6 +41,7 @@ import {
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { GitHubToolIdentityConfig } from "../config/types.tools.js";
 import { formatErrorMessage } from "../infra/errors.js";
+import { getOrCreatePromise } from "../shared/lazy-promise.js";
 import { pollGitHubDeviceFlow, startGitHubDeviceFlow } from "./github-oauth-device-flow.js";
 import {
   authorizationStillOwned,
@@ -395,24 +396,16 @@ export function createGitHubOAuthLifecycle(params: {
     await applyPendingRefresh(rotatedRecord, refreshed.tokens.accessToken);
   };
 
-  const requestRefresh = (configured: ConfiguredOAuthIdentity): Promise<void> => {
-    const refreshKey = configured.identity.profileId;
-    const existing = refreshes.get(refreshKey);
-    if (existing) {
-      return existing;
-    }
-    const operation = refreshOne(configured)
-      .catch((error: unknown) => {
-        params.warn(`GitHub OAuth refresh failed; will retry: ${formatErrorMessage(error)}`);
-      })
-      .finally(() => {
-        if (refreshes.get(refreshKey) === operation) {
-          refreshes.delete(refreshKey);
-        }
-      });
-    refreshes.set(refreshKey, operation);
-    return operation;
-  };
+  const requestRefresh = (configured: ConfiguredOAuthIdentity): Promise<void> =>
+    getOrCreatePromise(
+      refreshes,
+      configured.identity.profileId,
+      () =>
+        refreshOne(configured).catch((error: unknown) => {
+          params.warn(`GitHub OAuth refresh failed; will retry: ${formatErrorMessage(error)}`);
+        }),
+      { evictOnSettled: true },
+    );
 
   const reconcileRecords = async (): Promise<void> => {
     for (const { requestId, record } of listGitHubDeviceAuthorizationRecords()) {
@@ -588,19 +581,10 @@ export function createGitHubOAuthLifecycle(params: {
         pollAfterMs: pollIntervalMs,
       };
     },
-    pollAuthorization: (requestId: string): Promise<ToolsGitHubAuthorizePollResult> => {
-      const existing = devicePolls.get(requestId);
-      if (existing) {
-        return existing;
-      }
-      const operation = pollOnce(requestId).finally(() => {
-        if (devicePolls.get(requestId) === operation) {
-          devicePolls.delete(requestId);
-        }
-      });
-      devicePolls.set(requestId, operation);
-      return operation;
-    },
+    pollAuthorization: (requestId: string): Promise<ToolsGitHubAuthorizePollResult> =>
+      getOrCreatePromise(devicePolls, requestId, () => pollOnce(requestId), {
+        evictOnSettled: true,
+      }),
     cancelAuthorization: (requestId: string): boolean => {
       if (committingRequests.has(requestId)) {
         return false;

@@ -397,6 +397,30 @@ describe("personal GitHub through authenticated Gateway RPC", () => {
     expect(readUserGitHubConnection(owner())?.generation).not.toBe(connection.generation);
   });
 
+  it("preserves personal scope order and repairs corrupt state only on explicit disconnect", async () => {
+    network.poll.mockResolvedValueOnce({
+      status: "authorized",
+      tokens: { ...tokens, scopes: ["workflow", "repo", "repo"] },
+    });
+    const connected = await connect();
+    expect(connected.selection).toMatchObject({ scopes: ["workflow", "repo", "repo"] });
+    const db = openOpenClawStateDatabase().db;
+    db.prepare(
+      "UPDATE secret_store_entries SET value = ? WHERE scope_kind = 'identity' AND scope_id = ? AND name = 'github-connection'",
+    ).run(
+      JSON.stringify({ ...connected, selection: { ...connected.selection, refreshToken: null } }),
+      owner(),
+    );
+    expect(() => readUserGitHubConnection(owner())).toThrow("Personal GitHub state is invalid");
+    await expect(lifecycle.personal.refresh(owner())).rejects.toThrow(
+      "Personal GitHub state is invalid",
+    );
+    expect(await rpc(alice, "users.github.disconnect")).toHaveBeenCalledWith(true, {
+      disconnected: true,
+    });
+    expect(readUserGitHubConnection(owner())?.selection).toEqual({ kind: "disconnected" });
+  });
+
   it("rejects copied pending IDs before lookup, deduplication, or cancellation", async () => {
     const started = await start();
     advance();

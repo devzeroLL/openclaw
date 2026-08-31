@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import type { SessionGitHubPublicationResult } from "../../packages/gateway-protocol/src/schema/session-github-publication.js";
-import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
+import type { PreparedGitHubPublicationIdentity } from "../agents/github-tool-identity.js";
+import {
+  executeSqliteQuerySync,
+  executeSqliteQueryTakeFirstSync,
+  getNodeSqliteKysely,
+} from "../infra/kysely-sync.js";
 import { ensureGitHubPublicationSchema } from "../state/openclaw-state-db-schema-additive.js";
 import { tableExists } from "../state/openclaw-state-db-schema-helpers.js";
 import type { DB as StateDatabase } from "../state/openclaw-state-db.generated.js";
@@ -8,6 +13,7 @@ import {
   openOpenClawStateDatabase,
   runOpenClawStateWriteTransaction,
 } from "../state/openclaw-state-db.js";
+import type { WorkerSessionTurnClaim } from "./worker-environments/placement-store.js";
 
 type GitHubPublicationDatabase = Pick<
   StateDatabase,
@@ -81,21 +87,218 @@ export function claimGitHubPublicationExecution(
       update = current.gateway_instance_id
         ? update.where("gateway_instance_id", "=", current.gateway_instance_id)
         : update.where("gateway_instance_id", "is", null);
-      const claimed = executeSqliteQuerySync(db, update);
-      if (claimed.numAffectedRows !== 1n) {
+      const claimed = executeSqliteQueryTakeFirstSync(db, update.returningAll());
+      if (!claimed) {
         throw new Error("GitHub publication execution ownership changed.");
       }
-      return executeSqliteQuerySync(
-        db,
-        query
-          .selectFrom("github_publication_requests")
-          .selectAll()
-          .where("request_id", "=", requestId),
-      ).rows[0]!;
+      return claimed;
     },
     undefined,
     { operationLabel: "github-publication.claim" },
   );
+}
+
+export function matchesGitHubPublicationIdentityRow(
+  row: GitHubPublicationExecutionRow,
+  identity: Pick<PreparedGitHubPublicationIdentity, "source" | "profileId" | "account">,
+): boolean {
+  return (
+    row.identity_source === identity.source &&
+    row.identity_profile_id === (identity.profileId ?? null) &&
+    row.identity_account_id === identity.account.accountId &&
+    row.identity_login.toLowerCase() === identity.account.login.toLowerCase()
+  );
+}
+
+/** Insert/replay shared intent inside the caller's admission transaction. */
+export function insertGitHubPublicationRequest(
+  db: Parameters<typeof getNodeSqliteKysely>[0],
+  input: {
+    request: {
+      sessionKey: string;
+      agentId: string;
+      idempotencyKey: string;
+      title?: string;
+      body?: string;
+    };
+    requestId: string;
+    requestDigest: string;
+    sessionId: string;
+    now: number;
+    worktree: { id: string; repoFingerprint: string; branch: string };
+    identity: Pick<PreparedGitHubPublicationIdentity, "source" | "profileId" | "account">;
+    claim?: WorkerSessionTurnClaim;
+    snapshot?: { sourceHeadCommit: string; sourceIndexTree: string; workspaceTree: string };
+  },
+): GitHubPublicationRow {
+  const { request, identity, worktree, claim, snapshot } = input;
+  const query = githubPublicationDatabase(db);
+  executeSqliteQuerySync(
+    db,
+    query
+      .insertInto("github_publication_requests")
+      .values({
+        request_id: input.requestId,
+        idempotency_key: request.idempotencyKey,
+        request_digest: input.requestDigest,
+        session_id: input.sessionId,
+        session_key: request.sessionKey,
+        agent_id: request.agentId,
+        worktree_id: worktree.id,
+        repository_fingerprint: worktree.repoFingerprint,
+        claim_id: claim?.claimId ?? null,
+        run_id: claim?.runId ?? null,
+        environment_id: claim?.owner.environmentId ?? null,
+        owner_epoch: claim?.owner.ownerEpoch ?? null,
+        placement_generation: claim?.placementGeneration ?? null,
+        identity_source: identity.source,
+        identity_profile_id: identity.profileId ?? null,
+        identity_account_id: identity.account.accountId,
+        identity_login: identity.account.login,
+        title: request.title ?? null,
+        body: request.body ?? null,
+        branch: worktree.branch,
+        source_head_commit: snapshot?.sourceHeadCommit ?? null,
+        source_index_tree: snapshot?.sourceIndexTree ?? null,
+        workspace_tree: snapshot?.workspaceTree ?? null,
+        created_at_ms: input.now,
+        status: "requested",
+        gateway_instance_id: null,
+        repository: null,
+        base_branch: null,
+        head_commit: null,
+        pull_request_url: null,
+        error_code: null,
+        next_action: null,
+        updated_at_ms: input.now,
+        reported_at_ms: null,
+      })
+      .onConflict((conflict) => conflict.columns(["session_id", "idempotency_key"]).doNothing()),
+  );
+  const stored = executeSqliteQueryTakeFirstSync(
+    db,
+    query
+      .selectFrom("github_publication_requests")
+      .selectAll()
+      .where("session_id", "=", input.sessionId)
+      .where("idempotency_key", "=", request.idempotencyKey),
+  );
+  if (
+    !stored ||
+    stored.request_digest !== input.requestDigest ||
+    !matchesGitHubPublicationIdentityRow(stored, identity) ||
+    stored.worktree_id !== worktree.id ||
+    stored.repository_fingerprint !== worktree.repoFingerprint ||
+    stored.branch !== worktree.branch
+  ) {
+    throw new Error("GitHub publication idempotency key was reused.");
+  }
+  return stored;
+}
+
+/** Named execution transitions share one instance-bound write owner. */
+export function createGitHubPublicationExecutionStore(instanceId: string) {
+  const errors = {
+    "bind-workspace": "GitHub publication workspace snapshot changed before execution.",
+    begin: "GitHub publication state changed before execution.",
+    complete: "GitHub publication state changed before completion.",
+  };
+  const write = (
+    row: GitHubPublicationRow,
+    values: Partial<GitHubPublicationRow> | undefined,
+    transition: keyof typeof errors,
+  ): GitHubPublicationRow =>
+    runOpenClawStateWriteTransaction(
+      ({ db }) => {
+        if (!values) {
+          throw new Error("GitHub publication terminal result is invalid.");
+        }
+        let update = githubPublicationDatabase(db)
+          .updateTable("github_publication_requests")
+          .set({ ...values, updated_at_ms: Date.now() })
+          .where("request_id", "=", row.request_id)
+          .where("status", "=", "publishing")
+          .where("gateway_instance_id", "=", instanceId);
+        if (transition === "bind-workspace") {
+          update = update
+            .where("source_head_commit", "is", null)
+            .where("source_index_tree", "is", null)
+            .where("workspace_tree", "is", null);
+        }
+        const updated = executeSqliteQueryTakeFirstSync(db, update.returningAll());
+        if (!updated) {
+          throw new Error(errors[transition]);
+        }
+        return updated;
+      },
+      undefined,
+      { operationLabel: `github-publication.${transition}` },
+    );
+  return {
+    bindWorkspaceSnapshot: (input: {
+      row: GitHubPublicationRow;
+      sourceHeadCommit: string;
+      sourceIndexTree: string;
+      workspaceTree: string;
+    }): GitHubPublicationRow => {
+      return write(
+        input.row,
+        {
+          source_head_commit: input.sourceHeadCommit,
+          source_index_tree: input.sourceIndexTree,
+          workspace_tree: input.workspaceTree,
+        },
+        "bind-workspace",
+      );
+    },
+    updatePublishingFacts: (input: {
+      row: GitHubPublicationRow;
+      repository: string;
+      branch: string;
+      baseBranch: string;
+      sourceHeadCommit: string;
+      workspaceTree: string;
+      headCommit: string;
+    }): GitHubPublicationRow => {
+      return write(
+        input.row,
+        {
+          repository: input.repository,
+          branch: input.branch,
+          base_branch: input.baseBranch,
+          source_head_commit: input.sourceHeadCommit,
+          workspace_tree: input.workspaceTree,
+          head_commit: input.headCommit,
+        },
+        "begin",
+      );
+    },
+    complete: (
+      row: GitHubPublicationRow,
+      result: SessionGitHubPublicationResult,
+    ): GitHubPublicationRow => {
+      const values =
+        result.status === "published"
+          ? {
+              status: "published",
+              pull_request_url: result.url,
+              repository: result.repository,
+              branch: result.branch,
+              head_commit: result.headCommit,
+              error_code: null,
+              next_action: null,
+            }
+          : result.status === "failed"
+            ? {
+                status: "failed",
+                pull_request_url: null,
+                error_code: result.code,
+                next_action: result.nextAction,
+              }
+            : undefined;
+      return write(row, values, "complete");
+    },
+  };
 }
 
 export function deferGitHubPublicationRequests(requestIds: string[]): void {

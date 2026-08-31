@@ -9,6 +9,15 @@ import {
   readPersonalGitHubSecret,
   writePersonalGitHubSecret,
 } from "../secrets/store/secret-store-hidden-github.js";
+import {
+  githubOAuthTimestamp as timestamp,
+  githubOAuthSecret as secret,
+  githubOAuthProfileId as profileId,
+  githubOAuthScopes as scopes,
+  githubOAuthRefreshFields,
+  githubOAuthDeviceFields,
+  validGitHubDeviceTiming,
+} from "../shared/github-oauth-values.js";
 import { tableExists } from "./openclaw-state-db-schema-helpers.js";
 import type { DB } from "./openclaw-state-db.generated.js";
 import {
@@ -19,22 +28,6 @@ import {
 import { selectResolvedUserProfileById } from "./user-profiles-internal.js";
 import type { UserProfilesDatabase } from "./user-profiles-schema.js";
 
-const timestamp = z.number().int().nonnegative().safe();
-const secret = z
-  .string()
-  .min(1)
-  .max(2048)
-  .regex(/^[^\r\n]+$/u);
-const profileId = z.string().regex(/^ghp_[a-f0-9]{32}$/u);
-const scopes = z
-  .array(
-    z
-      .string()
-      .min(1)
-      .max(64)
-      .regex(/^[a-z0-9:_-]+$/u),
-  )
-  .max(32);
 const tokenPair = z.strictObject({
   accessToken: secret,
   refreshToken: secret,
@@ -59,22 +52,13 @@ const deviceFields = {
 const device = z.strictObject({
   ...deviceFields,
   kind: z.literal("device"),
-  deviceCode: z.string().regex(/^[A-Za-z0-9_-]{40}$/u),
-  userCode: z.string().regex(/^[A-Z0-9]{4}-[A-Z0-9]{4}$/u),
-  verificationUri: z.literal("https://github.com/login/device"),
-  pollIntervalMs: z.number().int().min(1000).max(60000),
-  nextPollAtMs: timestamp,
+  ...githubOAuthDeviceFields,
   candidate: z.strictObject({ profileId, tokens: tokenPair, receivedAtMs: timestamp }).optional(),
 });
 const connected = z.strictObject({
   kind: z.literal("connected"),
   profileId,
-  accountId: z.number().int().positive().safe(),
-  login: z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/u),
-  refreshToken: secret,
-  accessExpiresAtMs: timestamp,
-  refreshExpiresAtMs: timestamp,
-  scopes,
+  ...githubOAuthRefreshFields,
   refreshFailure: z.enum(["expired", "failed"]).optional(),
   refresh: z
     .strictObject({
@@ -101,14 +85,7 @@ const connectionSchema = z
   })
   .superRefine((record, ctx) => {
     const pending = record.pending;
-    if (
-      pending &&
-      (pending.expiresAtMs <= pending.createdAtMs ||
-        pending.expiresAtMs - pending.createdAtMs > 900000 ||
-        (pending.kind === "device" &&
-          (pending.nextPollAtMs < pending.createdAtMs ||
-            pending.nextPollAtMs > pending.expiresAtMs)))
-    ) {
+    if (pending && !validGitHubDeviceTiming(pending)) {
       ctx.addIssue({ code: "custom", message: "Invalid device timing" });
     }
     const selection = record.selection;
@@ -242,15 +219,7 @@ export function disconnectUserGitHubConnection(owner: string, assertCurrent: () 
   runOpenClawStateWriteTransaction(
     ({ db }) => {
       requireOwner(db, owner);
-      let previous: UserGitHubConnection | undefined;
-      try {
-        previous = readConnection(db, owner);
-      } catch (error) {
-        if (!(error instanceof PersonalGitHubStateError)) {
-          throw error;
-        }
-        /* Explicit disconnect also repairs corrupt private state. */
-      }
+      const previous = readConnectionForReplacement(db, owner);
       assertCurrent();
       writePersonalGitHubSecret(db, owner, JSON.stringify(disconnectedUserGitHubConnection()));
       retireAfterCommit(db, connectionProfiles(previous));
@@ -269,24 +238,25 @@ function connectionProfiles(record: UserGitHubConnection | undefined): string[] 
   ];
 }
 
+// Only explicit replacement may repair corruption. A broken merge target must
+// count as disconnected state so it never adopts the source's credentials.
+function readConnectionForReplacement(db: DatabaseSync, owner: string) {
+  try {
+    return readConnection(db, owner);
+  } catch (error) {
+    if (!(error instanceof PersonalGitHubStateError)) {
+      throw error;
+    }
+    return disconnectedUserGitHubConnection();
+  }
+}
+
 /** Transfer only this live source, never credentials stranded on historical aliases. */
 export function mergeUserGitHubConnection(db: DatabaseSync, source: string, target: string): void {
   requireOwner(db, source);
   requireOwner(db, target);
-  const readForMerge = (owner: string) => {
-    try {
-      return readConnection(db, owner);
-    } catch (error) {
-      if (!(error instanceof PersonalGitHubStateError)) {
-        throw error;
-      }
-      // Corruption counts as explicit state: a broken target must never adopt the
-      // source's credential. Invalidate it without guessing paths or token ownership.
-      return disconnectedUserGitHubConnection();
-    }
-  };
-  const sourceRecord = readForMerge(source);
-  const targetRecord = readForMerge(target);
+  const sourceRecord = readConnectionForReplacement(db, source);
+  const targetRecord = readConnectionForReplacement(db, target);
   const selected = targetRecord ?? sourceRecord;
   if (!selected) {
     return;

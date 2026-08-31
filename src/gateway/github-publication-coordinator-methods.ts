@@ -17,11 +17,11 @@ import {
   prepareCurrentGitHubPublicationIdentity,
   resolveGitHubPublicationWorktreeOwner,
 } from "./github-publication-availability.js";
-import { matchesGitHubPublicationIdentityRow } from "./github-publication-executor.js";
 import { captureGitHubPublicationWorkspaceSnapshot } from "./github-publication-git-transport.js";
 import {
   deferGitHubPublicationRequests as deferRequests,
   digestGitHubPublicationRequest as digestRequest,
+  insertGitHubPublicationRequest,
   ensureGitHubPublicationStore as ensureSchema,
   githubPublicationDatabase as publicationDb,
   hasGitHubPublicationStore as schemaExists,
@@ -230,68 +230,16 @@ export function createGitHubPublicationCoordinatorMethods(params: {
         input.assertCurrent?.();
         return runOpenClawStateWriteTransaction(
           ({ db }) => {
-            const query = publicationDb(db);
-            executeSqliteQuerySync(
-              db,
-              query
-                .insertInto("github_publication_requests")
-                .values({
-                  request_id: requestId,
-                  idempotency_key: input.idempotencyKey,
-                  request_digest: requestDigest,
-                  session_id: sessionId,
-                  session_key: loaded.canonicalKey,
-                  agent_id: input.agentId,
-                  worktree_id: worktree.id,
-                  repository_fingerprint: worktree.repoFingerprint,
-                  claim_id: null,
-                  run_id: null,
-                  environment_id: null,
-                  owner_epoch: null,
-                  placement_generation: null,
-                  identity_source: identity.source,
-                  identity_profile_id: identity.profileId ?? null,
-                  identity_account_id: identity.account.accountId,
-                  identity_login: identity.account.login,
-                  title: input.title ?? null,
-                  body: input.body ?? null,
-                  status: "requested",
-                  gateway_instance_id: null,
-                  repository: null,
-                  branch: worktree.branch,
-                  base_branch: null,
-                  source_head_commit: snapshot?.sourceHeadCommit ?? null,
-                  source_index_tree: snapshot?.sourceIndexTree ?? null,
-                  workspace_tree: snapshot?.workspaceTree ?? null,
-                  head_commit: null,
-                  pull_request_url: null,
-                  error_code: null,
-                  next_action: null,
-                  created_at_ms: now,
-                  updated_at_ms: now,
-                  reported_at_ms: null,
-                })
-                .onConflict((conflict) =>
-                  conflict.columns(["session_id", "idempotency_key"]).doNothing(),
-                ),
-            );
-            const stored = executeSqliteQuerySync(
-              db,
-              query
-                .selectFrom("github_publication_requests")
-                .selectAll()
-                .where("session_id", "=", sessionId)
-                .where("idempotency_key", "=", input.idempotencyKey),
-            ).rows[0];
-            if (
-              !stored ||
-              stored.request_digest !== requestDigest ||
-              !matchesGitHubPublicationIdentityRow(stored, identity) ||
-              !sameWorktree(stored, worktree)
-            ) {
-              throw new Error("GitHub publication idempotency key was reused.");
-            }
-            return stored;
+            return insertGitHubPublicationRequest(db, {
+              request: { ...input, sessionKey: loaded.canonicalKey },
+              requestId,
+              requestDigest,
+              now,
+              identity,
+              worktree,
+              sessionId,
+              snapshot,
+            });
           },
           undefined,
           { operationLabel: "github-publication.request-session" },

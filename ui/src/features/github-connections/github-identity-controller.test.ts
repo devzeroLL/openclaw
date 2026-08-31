@@ -125,7 +125,7 @@ function sync(
 }
 
 describe("GitHubIdentityController", () => {
-  it("keeps scope drafts isolated and clears only the inherited scope", async () => {
+  it("keeps independent controller drafts isolated and clears only the inherited target", async () => {
     const { controller, client, requests } = createController();
     const config = {
       tools: {
@@ -147,10 +147,11 @@ describe("GitHubIdentityController", () => {
         },
       },
     };
+    const system = createController();
     sync(controller, client, config, { scope: "agent" });
     controller.setDraft("token", "agent-token");
-    sync(controller, client, config);
-    controller.setDraft("token", "system-token");
+    sync(system.controller, system.client, config);
+    system.controller.setDraft("token", "system-token");
     sync(controller, client, config, { scope: "agent" });
 
     expect(controller.draft.token).toBe("agent-token");
@@ -162,8 +163,9 @@ describe("GitHubIdentityController", () => {
     });
     expect(controller.scope).toBe("agent");
     expect(controller.draft).toEqual({ token: "", name: "", email: "" });
-    sync(controller, client, config);
-    expect(controller.draft).toMatchObject({ name: "System Author", token: "system-token" });
+    sync(system.controller, system.client, config);
+    expect(system.controller.draft).toMatchObject({ name: "System Author", token: "system-token" });
+    expect(system.requests).toEqual([]);
   });
 
   it("hands off the token directly and adopts configure status without verifying again", async () => {

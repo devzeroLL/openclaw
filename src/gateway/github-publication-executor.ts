@@ -46,7 +46,10 @@ import {
   resolveGitHubPublicationPullRequest,
 } from "./github-publication-pull-requests.js";
 import { recoverGitHubPublicationWorkspace } from "./github-publication-recovery.js";
-import type { GitHubPublicationExecutionRow } from "./github-publication-store.js";
+import {
+  matchesGitHubPublicationIdentityRow,
+  type GitHubPublicationExecutionRow,
+} from "./github-publication-store.js";
 import { prepareGitHubPublicationTarget } from "./github-publication-target.js";
 import { SessionMutationAuthorizationChangedError } from "./session-sharing.js";
 
@@ -55,18 +58,6 @@ const PUBLICATION_MARKER = "OpenClaw-Publication";
 type PublicationRow = GitHubPublicationExecutionRow;
 
 class GitHubPublicationAuthorityLostError extends Error {}
-
-export function matchesGitHubPublicationIdentityRow(
-  row: PublicationRow,
-  identity: PreparedGitHubPublicationIdentity,
-): boolean {
-  return (
-    row.identity_source === identity.source &&
-    row.identity_profile_id === (identity.profileId ?? null) &&
-    row.identity_account_id === identity.account.accountId &&
-    row.identity_login.toLowerCase() === identity.account.login.toLowerCase()
-  );
-}
 
 function parseJsonObject(value: string, label: string): Record<string, unknown> {
   let parsed: unknown;

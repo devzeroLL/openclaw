@@ -1,9 +1,9 @@
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
-import type { ToolsGitHubAuthorizeStartResult, ToolsGitHubStatusResult } from "../../api/types.ts";
+import type { ToolsGitHubAuthorizeStartResult } from "../../api/types.ts";
 import type { RuntimeConfigCapability } from "../../lib/config/runtime-config-capability.ts";
 
-export type GitHubSharedScope = "system" | "agent";
+type GitHubSharedScope = "system" | "agent";
 export type GitHubIdentityScope = "personal" | GitHubSharedScope;
 export type GitHubIdentityDraft = { token: string; name: string; email: string };
 type GitHubConnectionOwner =
@@ -59,14 +59,6 @@ export type GitHubIdentityHost = {
   requestUpdate: () => void;
   runExternalMutation?: RuntimeConfigCapability["runExternalMutation"];
 };
-
-export type GitHubConfigureMutationResult =
-  | {
-      ok: true;
-      value: ToolsGitHubStatusResult;
-      refresh: { ok: true } | { ok: false; error: string };
-    }
-  | { ok: false; error: string };
 
 export function configFingerprint(value: unknown): string {
   return JSON.stringify(value ?? null);

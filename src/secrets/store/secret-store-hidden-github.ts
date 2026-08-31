@@ -146,34 +146,42 @@ export function writePersonalGitHubSecret(
   validateHiddenGitHubSecretValue(value);
   ensureSecretStoreSchema(db);
   const now = Date.now();
-  executeSqliteQuerySync(
+  upsertHiddenGitHubSecret(
     db,
-    query
-      .insertInto("secret_store_entries")
-      .values({
-        scope_kind: "identity",
-        scope_id: profileId,
-        name: "github-connection",
-        value,
-        kind: "secret",
-        allowed_hosts: null,
-        deleted_at_ms: null,
-        created_at_ms: now,
-        updated_at_ms: now,
-        updated_by: null,
-      })
-      .onConflict((conflict) =>
-        conflict.columns(["scope_kind", "scope_id", "name"]).doUpdateSet({
-          value,
-          kind: "secret",
-          allowed_hosts: null,
-          deleted_at_ms: null,
-          updated_at_ms: now,
-          updated_by: null,
-        }),
-      ),
+    {
+      scope_kind: "identity",
+      scope_id: profileId,
+      name: "github-connection",
+      value,
+      updated_by: null,
+    },
+    now,
   );
   registerSecretValueForRedaction(value);
+}
+
+function upsertHiddenGitHubSecret(
+  db: DatabaseSync,
+  entry: Pick<HiddenGitHubStoreRow, "scope_kind" | "scope_id" | "name" | "value" | "updated_by">,
+  now: number,
+): void {
+  const values = {
+    value: entry.value,
+    updated_by: entry.updated_by,
+    kind: "secret",
+    allowed_hosts: null,
+    deleted_at_ms: null,
+    updated_at_ms: now,
+  };
+  executeSqliteQuerySync(
+    db,
+    getNodeSqliteKysely<HiddenGitHubStoreDatabase>(db)
+      .insertInto("secret_store_entries")
+      .values({ ...entry, ...values, created_at_ms: now })
+      .onConflict((conflict) =>
+        conflict.columns(["scope_kind", "scope_id", "name"]).doUpdateSet(values),
+      ),
+  );
 }
 
 function isLiveHiddenGitHubStoreRow(
@@ -204,33 +212,16 @@ export function writeHiddenGitHubSecretRecord(params: {
   runOpenClawStateWriteTransaction(
     ({ db: sqlite }) => {
       ensureSecretStoreSchema(sqlite);
-      const db = getNodeSqliteKysely<HiddenGitHubStoreDatabase>(sqlite);
-      executeSqliteQuerySync(
+      upsertHiddenGitHubSecret(
         sqlite,
-        db
-          .insertInto("secret_store_entries")
-          .values({
-            scope_kind: "team",
-            scope_id: "",
-            name: params.name,
-            value: params.value,
-            kind: "secret",
-            created_at_ms: now,
-            updated_at_ms: now,
-            updated_by: params.updatedBy ?? null,
-            deleted_at_ms: null,
-            allowed_hosts: null,
-          })
-          .onConflict((conflict) =>
-            conflict.columns(["scope_kind", "scope_id", "name"]).doUpdateSet({
-              value: params.value,
-              kind: "secret",
-              updated_at_ms: now,
-              updated_by: params.updatedBy ?? null,
-              deleted_at_ms: null,
-              allowed_hosts: null,
-            }),
-          ),
+        {
+          scope_kind: "team",
+          scope_id: "",
+          name: params.name,
+          value: params.value,
+          updated_by: params.updatedBy ?? null,
+        },
+        now,
       );
     },
     params.database,

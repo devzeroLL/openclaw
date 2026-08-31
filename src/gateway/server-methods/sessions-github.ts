@@ -2,15 +2,28 @@ import {
   ErrorCodes,
   errorShape,
   validateSessionGitHubPublishParams,
+  validateSessionGitHubOptionsParams,
+  validateSessionGitHubStatusParams,
+  validateSessionGitHubConfirmParams,
 } from "../../../packages/gateway-protocol/src/index.js";
 import { getGatewayToolCallerIdentity } from "../../agents/tools/gateway-caller-context.js";
-import { SessionMutationAuthorizationChangedError } from "../session-sharing.js";
+import { prepareCurrentGitHubPublicationIdentity } from "../github-publication-availability.js";
+import {
+  createSessionListEntryFilter,
+  SessionMutationAuthorizationChangedError,
+} from "../session-sharing.js";
 import { loadGatewaySessionEntryReadOnly } from "../session-utils.js";
+import {
+  preparePersonalGitHubAction,
+  prepareGitHubPublicationOptionsRead,
+  preparePersonalGitHubSessionAction,
+} from "./github-personal-authorization.js";
 import type { GatewayRequestHandlers } from "./types.js";
 import { assertValidParams } from "./validation.js";
 
 export const sessionsGitHubHandlers: GatewayRequestHandlers = {
-  "sessions.github.publish": async ({ params, respond, context, sessionMutationAuthorization }) => {
+  "sessions.github.publish": async (options) => {
+    const { params, respond, context, sessionMutationAuthorization } = options;
     if (
       !assertValidParams(
         params,
@@ -53,6 +66,16 @@ export const sessionsGitHubHandlers: GatewayRequestHandlers = {
       return;
     }
     try {
+      if (params.selection?.source === "personal") {
+        if (!params.sessionKey) {
+          throw new Error("My GitHub publication requires an explicit session.");
+        }
+        const action = preparePersonalGitHubSessionAction(options, params.sessionKey);
+        const result = await coordinator.requestPersonalForSession(params, action);
+        action.assertCurrent();
+        respond(true, result);
+        return;
+      }
       sessionMutationAuthorization?.assertCurrent();
       const result = await coordinator.requestForSession({
         ...params,
@@ -77,6 +100,163 @@ export const sessionsGitHubHandlers: GatewayRequestHandlers = {
         errorShape(
           ErrorCodes.UNAVAILABLE,
           error instanceof Error ? error.message : "GitHub publication request failed",
+        ),
+      );
+    }
+  },
+  "sessions.github.options": async (options) => {
+    if (
+      !assertValidParams(
+        options.params,
+        validateSessionGitHubOptionsParams,
+        "sessions.github.options",
+        options.respond,
+      )
+    ) {
+      return;
+    }
+    try {
+      const read = prepareGitHubPublicationOptionsRead(options);
+      const loaded = loadGatewaySessionEntryReadOnly(options.params.sessionKey);
+      const filter = createSessionListEntryFilter({
+        cfg: options.context.getRuntimeConfig(),
+        client: read.currentClient(),
+      });
+      if (!loaded.entry || filter?.(loaded.canonicalKey, loaded.entry) === false) {
+        throw new Error("GitHub publication session was not found.");
+      }
+      let shared = null;
+      try {
+        const identity = await prepareCurrentGitHubPublicationIdentity(loaded.agentId);
+        shared = {
+          source: identity.source,
+          accountId: identity.account.accountId,
+          login: identity.account.login,
+        };
+      } catch {
+        /* An unavailable shared account must not hide the caller's personal option. */
+      }
+      const service = options.context.githubOAuthService?.personal;
+      if (
+        read.personal.kind === "eligible" &&
+        (!service || !options.context.githubPublicationService)
+      ) {
+        throw new Error("GitHub connections are unavailable; retry after Gateway startup.");
+      }
+      const action = read.personal.kind === "eligible" ? read.personal.action : null;
+      const personal = action ? await service!.status(action) : null;
+      const current = loadGatewaySessionEntryReadOnly(loaded.canonicalKey, {
+        agentId: loaded.agentId,
+      });
+      const currentFilter = createSessionListEntryFilter({
+        cfg: options.context.getRuntimeConfig(),
+        client: read.currentClient(),
+      });
+      if (
+        !current.entry ||
+        current.entry.sessionId !== loaded.entry.sessionId ||
+        currentFilter?.(current.canonicalKey, current.entry) === false
+      ) {
+        throw new Error("GitHub publication session access changed; select the session again.");
+      }
+      options.respond(true, {
+        personal,
+        shared,
+        pendingPersonal: action
+          ? options.context.githubPublicationService!.personalPending(action, {
+              sessionKey: loaded.canonicalKey,
+              agentId: loaded.agentId,
+              sessionId: current.entry.sessionId,
+            })
+          : null,
+      });
+    } catch (error) {
+      options.respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.FORBIDDEN,
+          error instanceof Error ? error.message : "GitHub publication options are unavailable.",
+        ),
+      );
+    }
+  },
+  "sessions.github.status": (options) => {
+    if (
+      !assertValidParams(
+        options.params,
+        validateSessionGitHubStatusParams,
+        "sessions.github.status",
+        options.respond,
+      )
+    ) {
+      return;
+    }
+    try {
+      const action = preparePersonalGitHubAction(options);
+      const read = prepareGitHubPublicationOptionsRead(options);
+      const loaded = loadGatewaySessionEntryReadOnly(options.params.sessionKey);
+      const filter = createSessionListEntryFilter({
+        cfg: options.context.getRuntimeConfig(),
+        client: read.currentClient(),
+      });
+      if (!loaded.entry || filter?.(loaded.canonicalKey, loaded.entry) === false) {
+        throw new Error("GitHub publication session was not found.");
+      }
+      const service = options.context.githubPublicationService;
+      if (!service) {
+        throw new Error("GitHub publication is unavailable.");
+      }
+      options.respond(
+        true,
+        service.personalStatus(
+          action,
+          {
+            sessionKey: loaded.canonicalKey,
+            agentId: loaded.agentId,
+            sessionId: loaded.entry.sessionId,
+          },
+          options.params.requestId,
+        ),
+      );
+    } catch (error) {
+      options.respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.FORBIDDEN,
+          error instanceof Error ? error.message : "GitHub publication status is unavailable.",
+        ),
+      );
+    }
+  },
+  "sessions.github.confirm": async (options) => {
+    if (
+      !assertValidParams(
+        options.params,
+        validateSessionGitHubConfirmParams,
+        "sessions.github.confirm",
+        options.respond,
+      )
+    ) {
+      return;
+    }
+    try {
+      const action = preparePersonalGitHubSessionAction(options, options.params.sessionKey);
+      const service = options.context.githubPublicationService;
+      if (!service) {
+        throw new Error("GitHub publication is unavailable.");
+      }
+      const result = await service.confirmPersonal(options.params, action);
+      action.assertCurrent();
+      options.respond(true, result);
+    } catch (error) {
+      options.respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.FORBIDDEN,
+          error instanceof Error ? error.message : "GitHub publication confirmation failed.",
         ),
       );
     }

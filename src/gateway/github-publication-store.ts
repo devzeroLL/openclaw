@@ -14,6 +14,10 @@ type GitHubPublicationDatabase = Pick<
   "github_publication_requests" | "worker_session_placements"
 >;
 export type GitHubPublicationRow = StateDatabase["github_publication_requests"];
+export type GitHubPublicationExecutionRow = Omit<
+  GitHubPublicationRow,
+  "claim_id" | "run_id" | "environment_id" | "owner_epoch" | "placement_generation"
+> & { last_effect?: string | null; effect_state?: string | null };
 type PublicationFailureCode = Extract<SessionGitHubPublicationResult, { status: "failed" }>["code"];
 
 const PUBLICATION_FAILURE_CODES = new Set<string>([
@@ -162,11 +166,37 @@ export function digestGitHubPublicationRequest(params: {
 }
 
 export function projectGitHubPublicationResult(
-  row: GitHubPublicationRow,
+  row: GitHubPublicationExecutionRow,
 ): SessionGitHubPublicationResult {
+  const effect: Pick<SessionGitHubPublicationResult, "effect"> =
+    (row.last_effect === "push" || row.last_effect === "pull_request") &&
+    (row.effect_state === "dispatched" || row.effect_state === "observed")
+      ? {
+          effect: {
+            kind: row.last_effect,
+            status: row.effect_state,
+            ...(row.head_commit ? { headCommit: row.head_commit } : {}),
+            ...(row.pull_request_url ? { url: row.pull_request_url } : {}),
+          },
+        }
+      : {};
+  const publisher = {
+    source:
+      row.identity_source === "personal"
+        ? ("personal" as const)
+        : row.identity_source === "agent-override"
+          ? ("agent-override" as const)
+          : row.identity_source === "system-configured"
+            ? ("system-configured" as const)
+            : ("system-detected" as const),
+    accountId: row.identity_account_id,
+    login: row.identity_login,
+  };
   if (row.status === "published" && row.pull_request_url && row.repository && row.branch) {
     return {
       requestId: row.request_id,
+      publisher,
+      ...effect,
       status: "published",
       url: row.pull_request_url,
       repository: row.repository,
@@ -177,18 +207,34 @@ export function projectGitHubPublicationResult(
   if (row.status === "failed" && row.error_code && row.next_action) {
     return {
       requestId: row.request_id,
+      publisher,
+      ...effect,
       status: "failed",
       code: publicationFailureCode(row.error_code),
       message: "GitHub publication failed.",
       nextAction: row.next_action,
     };
   }
+  if (row.status === "needs_confirmation") {
+    return {
+      requestId: row.request_id,
+      publisher,
+      ...effect,
+      status: "needs_confirmation",
+      message:
+        "Confirm the original My GitHub account, target, and workspace to continue this interrupted publication. Already-dispatched GitHub effects may have completed; confirmation checks them before retrying.",
+    };
+  }
   return {
     requestId: row.request_id,
+    publisher,
+    ...effect,
     status: row.status === "publishing" ? "publishing" : "requested",
     message:
       row.status === "publishing"
         ? "The Gateway is publishing the reconciled workspace."
-        : "Publication was accepted. Finish the turn so the Gateway can reconcile and publish the workspace.",
+        : row.identity_source === "personal"
+          ? "My GitHub publication was accepted for the selected account and workspace."
+          : "Publication was accepted. Finish the turn so the Gateway can reconcile and publish the workspace.",
   };
 }

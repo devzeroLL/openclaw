@@ -8,13 +8,13 @@ import { generateUUID } from "../../lib/uuid.ts";
 import type {
   GitHubConfigureMutationResult,
   GitHubIdentityDraft,
-  GitHubIdentityScope,
-  RequestOwner,
+  GitHubSharedScope,
+  SharedRequestOwner,
 } from "./github-identity-controller-shared.ts";
 
 type MutationOwner = {
-  owner: RequestOwner;
-  scope: GitHubIdentityScope;
+  owner: SharedRequestOwner;
+  scope: GitHubSharedScope;
   isCurrent: () => boolean;
   isConfigurable: () => boolean;
   begin: () => void;
@@ -76,7 +76,7 @@ export async function runGitHubIdentityConfigure(
     }
     const result = await runConfigureMutation(mutation, {
       scope: mutation.scope,
-      agentId: mutation.owner.agentId,
+      agentId: mutation.owner.target.agentId,
       mode: "managed",
       secretName,
       ...(name || email
@@ -144,7 +144,7 @@ export async function runGitHubIdentityInherit(
   try {
     const result = await runConfigureMutation(mutation, {
       scope: mutation.scope,
-      agentId: mutation.owner.agentId,
+      agentId: mutation.owner.target.agentId,
       mode: "inherit",
     });
     if (!result.ok) {

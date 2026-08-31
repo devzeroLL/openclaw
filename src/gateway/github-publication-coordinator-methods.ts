@@ -9,6 +9,11 @@ import {
   runOpenClawStateWriteTransaction,
 } from "../state/openclaw-state-db.js";
 import {
+  listUnreportedPersonalGitHubPublications,
+  markPersonalGitHubPublicationReported,
+} from "./github-personal-publication-store.js";
+import {
+  assertExpectedSharedGitHubPublisher,
   prepareCurrentGitHubPublicationIdentity,
   resolveGitHubPublicationWorktreeOwner,
 } from "./github-publication-availability.js";
@@ -37,6 +42,7 @@ type ClaimRequest = {
   title?: string;
   body?: string;
   assertCurrent?: () => void;
+  expectedPublisher?: import("../../packages/gateway-protocol/src/schema/session-github-publication.js").GitHubPublicationPublisher;
 };
 
 function exactClaimForPlacement(
@@ -101,6 +107,10 @@ export function createGitHubPublicationCoordinatorMethods(params: {
         assertCurrent?: () => void;
       },
     ): Promise<SessionGitHubPublicationResult> {
+      if (input.selection?.source === "personal") {
+        throw new Error("My GitHub publication requires direct personal authorization.");
+      }
+      const expected = input.selection?.expected;
       ensureSchema();
       if (!input.sessionKey) {
         throw new Error("GitHub publication requires an authoritative session.");
@@ -143,6 +153,7 @@ export function createGitHubPublicationCoordinatorMethods(params: {
       const claim = placement ? exactClaimForPlacement(placement) : undefined;
       if (claim && input.expectedRunId && claim.runId === input.expectedRunId) {
         const accepted = await requestForClaim({
+          expectedPublisher: expected,
           claim,
           sessionKey: loaded.canonicalKey,
           agentId: input.agentId,
@@ -197,12 +208,18 @@ export function createGitHubPublicationCoordinatorMethods(params: {
           throw new Error("GitHub publication idempotency key was reused.");
         }
         if (existing.status === "published" || existing.status === "failed") {
-          return publicationResult(existing);
+          const result = publicationResult(existing);
+          assertExpectedSharedGitHubPublisher(expected, result.publisher!);
+          return result;
         }
       }
       input.assertCurrent?.();
       const identity = await prepareCurrentGitHubPublicationIdentity(input.agentId);
       input.assertCurrent?.();
+      assertExpectedSharedGitHubPublisher(expected, {
+        source: identity.source,
+        ...identity.account,
+      });
       const insertSessionRequest = (snapshot?: {
         sourceHeadCommit: string;
         sourceIndexTree: string;
@@ -439,24 +456,28 @@ export function createGitHubPublicationCoordinatorMethods(params: {
       agentId: string;
       result: SessionGitHubPublicationResult;
     }> {
+      const personal = listUnreportedPersonalGitHubPublications();
       if (!schemaExists()) {
-        return [];
+        return personal;
       }
       const db = openOpenClawStateDatabase().db;
-      return executeSqliteQuerySync(
-        db,
-        publicationDb(db)
-          .selectFrom("github_publication_requests")
-          .selectAll()
-          .where("status", "in", ["published", "failed"])
-          .where("reported_at_ms", "is", null)
-          .orderBy("updated_at_ms"),
-      ).rows.map((row) => ({
-        sessionId: row.session_id,
-        sessionKey: row.session_key,
-        agentId: row.agent_id,
-        result: publicationResult(row),
-      }));
+      return [
+        ...personal,
+        ...executeSqliteQuerySync(
+          db,
+          publicationDb(db)
+            .selectFrom("github_publication_requests")
+            .selectAll()
+            .where("status", "in", ["published", "failed"])
+            .where("reported_at_ms", "is", null)
+            .orderBy("updated_at_ms"),
+        ).rows.map((row) => ({
+          sessionId: row.session_id,
+          sessionKey: row.session_key,
+          agentId: row.agent_id,
+          result: publicationResult(row),
+        })),
+      ];
     },
 
     read(requestId: string): SessionGitHubPublicationResult | undefined {
@@ -465,6 +486,7 @@ export function createGitHubPublicationCoordinatorMethods(params: {
     },
 
     markReported(requestId: string): void {
+      markPersonalGitHubPublicationReported(requestId);
       ensureSchema();
       runOpenClawStateWriteTransaction(
         ({ db }) => {

@@ -1,3 +1,4 @@
+import type { DatabaseSync } from "node:sqlite";
 import type { Selectable } from "kysely";
 import { hasErrnoCode } from "../../infra/errno.js";
 import {
@@ -80,6 +81,99 @@ function validateHiddenGitHubSecretValue(value: string): void {
       "Secret store value is empty. Secret entries require a value; check the command that produced it.",
     );
   }
+}
+
+export class PersonalGitHubStateError extends Error {
+  constructor() {
+    super("Personal GitHub state is invalid; disconnect and reconnect My GitHub.");
+  }
+}
+
+/** Private GitHub aggregate only; identity secrets have no generic reader or projection. */
+export function readPersonalGitHubSecret(db: DatabaseSync, profileId: string): string | undefined {
+  try {
+    const row = executeSqliteQueryTakeFirstSync(
+      db,
+      getNodeSqliteKysely<HiddenGitHubStoreDatabase>(db)
+        .selectFrom("secret_store_entries")
+        .select(["value", "kind", "allowed_hosts"])
+        .where("scope_kind", "=", "identity")
+        .where("scope_id", "=", profileId)
+        .where("name", "=", "github-connection")
+        .where("deleted_at_ms", "is", null),
+    );
+    if (row) {
+      if (row.kind !== "secret" || row.allowed_hosts !== null) {
+        throw new PersonalGitHubStateError();
+      }
+      try {
+        validateHiddenGitHubSecretValue(row.value);
+      } catch (error) {
+        if (error instanceof SecretStoreValidationError) {
+          throw new PersonalGitHubStateError();
+        }
+        throw error;
+      }
+      registerSecretValueForRedaction(row.value);
+    }
+    return row?.value;
+  } catch (error) {
+    if (isMissingSecretStoreTableError(error)) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+/** The caller owns the synchronous profile/connection transaction and its preconditions. */
+export function writePersonalGitHubSecret(
+  db: DatabaseSync,
+  profileId: string,
+  value: string | null,
+): void {
+  const query = getNodeSqliteKysely<HiddenGitHubStoreDatabase>(db);
+  if (value === null) {
+    executeSqliteQuerySync(
+      db,
+      query
+        .deleteFrom("secret_store_entries")
+        .where("scope_kind", "=", "identity")
+        .where("scope_id", "=", profileId)
+        .where("name", "=", "github-connection"),
+    );
+    return;
+  }
+  validateHiddenGitHubSecretValue(value);
+  ensureSecretStoreSchema(db);
+  const now = Date.now();
+  executeSqliteQuerySync(
+    db,
+    query
+      .insertInto("secret_store_entries")
+      .values({
+        scope_kind: "identity",
+        scope_id: profileId,
+        name: "github-connection",
+        value,
+        kind: "secret",
+        allowed_hosts: null,
+        deleted_at_ms: null,
+        created_at_ms: now,
+        updated_at_ms: now,
+        updated_by: null,
+      })
+      .onConflict((conflict) =>
+        conflict.columns(["scope_kind", "scope_id", "name"]).doUpdateSet({
+          value,
+          kind: "secret",
+          allowed_hosts: null,
+          deleted_at_ms: null,
+          updated_at_ms: now,
+          updated_by: null,
+        }),
+      ),
+  );
+  registerSecretValueForRedaction(value);
 }
 
 function isLiveHiddenGitHubStoreRow(

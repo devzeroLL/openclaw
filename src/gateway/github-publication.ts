@@ -1,11 +1,14 @@
 import { randomUUID } from "node:crypto";
 import type { SessionGitHubPublicationResult } from "../../packages/gateway-protocol/src/schema/session-github-publication.js";
+import { acquireWorktreeRunLease } from "../agents/worktrees/run-lease.js";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import {
   openOpenClawStateDatabase,
   runOpenClawStateWriteTransaction,
 } from "../state/openclaw-state-db.js";
+import { createPersonalGitHubPublicationCoordinator } from "./github-personal-publication.js";
 import {
+  assertExpectedSharedGitHubPublisher,
   prepareCurrentGitHubPublicationIdentity,
   resolveGitHubPublicationWorktreeOwner,
 } from "./github-publication-availability.js";
@@ -127,6 +130,7 @@ export function createGitHubPublicationCoordinator(params: {
     title?: string;
     body?: string;
     assertCurrent?: () => void;
+    expectedPublisher?: import("../../packages/gateway-protocol/src/schema/session-github-publication.js").GitHubPublicationPublisher;
   }): Promise<SessionGitHubPublicationResult> => {
     ensureSchema();
     request.assertCurrent?.();
@@ -149,6 +153,10 @@ export function createGitHubPublicationCoordinator(params: {
     request.assertCurrent?.();
     const identity = await prepareCurrentGitHubPublicationIdentity(request.agentId);
     request.assertCurrent?.();
+    assertExpectedSharedGitHubPublisher(request.expectedPublisher, {
+      source: identity.source,
+      ...identity.account,
+    });
     if (!params.placements.validateTurnClaim(request.claim)) {
       throw new Error("GitHub publication lost the live session turn claim after verification.");
     }
@@ -457,22 +465,36 @@ export function createGitHubPublicationCoordinator(params: {
     if (claimed.status === "published" || claimed.status === "failed") {
       return Promise.resolve(publicationResult(claimed));
     }
-    const operation = executeGitHubPublication({
-      initial: claimed,
-      validateAuthority: () => validateAuthority() && ownsExecution(claimed.request_id, instanceId),
-      projectResult: publicationResult,
-      bindWorkspaceSnapshot,
-      updatePublishingFacts,
-      complete,
-      defer: (row) => {
-        deferRequests([row.request_id]);
-        const deferred = readById(row.request_id);
-        if (!deferred) {
-          throw new Error("GitHub publication request disappeared.");
+    const operation = params.placements.withWorkspaceExclusion(
+      claimed.session_id,
+      async (assertOwned) => {
+        const lease = await acquireWorktreeRunLease(claimed.worktree_id);
+        try {
+          assertOwned();
+          return await executeGitHubPublication({
+            initial: claimed,
+            validateAuthority: () => {
+              assertOwned();
+              return validateAuthority() && ownsExecution(claimed.request_id, instanceId);
+            },
+            projectResult: publicationResult,
+            bindWorkspaceSnapshot,
+            updatePublishingFacts,
+            complete,
+            defer: (row) => {
+              deferRequests([row.request_id]);
+              const deferred = readById(row.request_id);
+              if (!deferred) {
+                throw new Error("GitHub publication request disappeared.");
+              }
+              return deferred;
+            },
+          });
+        } finally {
+          await lease.release();
         }
-        return deferred;
       },
-    });
+    );
     activePublicationExecutions.set(executionKey, operation);
     const release = () => {
       if (activePublicationExecutions.get(executionKey) === operation) {
@@ -571,6 +593,7 @@ export function createGitHubPublicationCoordinator(params: {
   };
 
   return {
+    ...createPersonalGitHubPublicationCoordinator(params.placements),
     requestForClaim,
     prepareClaimWorkspace,
     deferClaimPreparation,

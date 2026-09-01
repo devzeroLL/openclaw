@@ -77,6 +77,14 @@ describe("CLI runtime admission", () => {
   posixIt.each([
     ["ordinary target", [ordinaryQa]],
     [
+      "source Doctor fixture",
+      [
+        "--config",
+        "test/vitest/vitest.commands.config.ts",
+        "doctor-config-preflight.process.test.ts",
+      ],
+    ],
+    [
       "Gateway scoped exclusion",
       ["--config", "test/vitest/vitest.gateway-core.config.ts", "--exclude", "gateway-*.test.ts"],
     ],
@@ -166,6 +174,17 @@ syncBuiltinESMExports();\n`,
         "--config",
         "test/vitest/vitest.gateway-core.config.ts",
         "gateway-active-memory.test.ts",
+      ],
+      "runtime",
+    ],
+    [
+      "Gateway cron migration",
+      "scripts/run-vitest.mts",
+      [
+        "run",
+        "--config",
+        "test/vitest/vitest.commands.config.ts",
+        "doctor-config-preflight.gateway.process.test.ts",
       ],
       "runtime",
     ],

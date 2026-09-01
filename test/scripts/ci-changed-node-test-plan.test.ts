@@ -13,6 +13,7 @@ import {
   hasSqliteSessionLifecycleAffectingChange,
   resolveChangedDockerSeedLanes,
 } from "../../scripts/lib/ci-changed-node-test-plan.mts";
+import { createNodeTestShards } from "../../scripts/lib/ci-node-test-plan.mts";
 import {
   listExtensionTestFilesForRoots,
   resolveExtensionTestConfig,
@@ -97,6 +98,24 @@ it.each([
 });
 
 describe("CI changed Node test plan", () => {
+  it.each([
+    "src/commands/doctor-config-preflight.gateway.process.test.ts",
+    "src/commands/doctor-config-preflight.ts",
+    "src/commands/doctor-config-preflight-startup.ts",
+    "src/commands/doctor/cron/legacy-repair.ts",
+    "src/commands/doctor/cron/store-migration.ts",
+    "src/cron/persisted-shape.ts",
+  ])("prepares the Gateway cron migration proof when %s changes", (changedPath) => {
+    const target = "src/commands/doctor-config-preflight.gateway.process.test.ts";
+    // Core/SDK impact intentionally falls back to the full catalog. Both paths
+    // must retain the subprocess proof and prepare its runtime before workers.
+    const shards = createChangedNodeTestShards([changedPath]) ?? createNodeTestShards();
+    const owner = shards.find((shard) =>
+      (shard.includePatterns ?? ("targets" in shard ? shard.targets : undefined))?.includes(target),
+    );
+    expect(owner?.pretestBuildMode).toBe("runtime");
+  });
+
   it.each([
     "extensions/copilot/index.ts",
     "extensions/copilot/harness.ts",

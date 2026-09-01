@@ -65,6 +65,19 @@ describe("test runtime prerequisites", () => {
     ["CLI directory", ["src/cli"], "runtime"],
     ["CLI config", ["test/vitest/vitest.cli.config.ts"], "runtime"],
     ["ordinary CLI unit test", ["src/cli/command-path-policy.test.ts"], undefined],
+    ["Doctor CLI processes", ["src/commands/doctor-config-preflight.process.test.ts"], "runtime"],
+    [
+      "Doctor repair rollback",
+      ["src/commands/doctor-config-preflight.v17-atomicity.process.test.ts"],
+      "runtime",
+    ],
+    ["commands directory", ["src/commands"], "runtime"],
+    ["commands config", ["test/vitest/vitest.commands.config.ts"], "runtime"],
+    [
+      "Doctor source module probe",
+      ["src/commands/doctor-config-preflight.pristine.process.test.ts"],
+      undefined,
+    ],
     ["Active Memory Gateway", ["src/gateway/gateway-active-memory.test.ts"], "runtime"],
     ["concurrent Gateway streams", ["src/gateway/gateway-concurrent-streams.test.ts"], "runtime"],
     [

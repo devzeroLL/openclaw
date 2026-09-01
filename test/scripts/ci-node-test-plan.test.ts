@@ -389,8 +389,8 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
       runnerBackend: "hybrid",
     };
     const fallback = createNodeTestShardBundles(options);
-    // The whole CLI group pays 77s of tests plus its 100s runtime build.
-    // It must stay alone; all other non-dist fallback jobs remain within 150s.
+    // CLI and Doctor groups each pay a 100s runtime build before their tests.
+    // They must stay alone; all other non-dist fallback jobs remain within 150s.
     expect(
       fallback
         .filter((shard) => !shard.requiresDist)
@@ -400,7 +400,14 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
           pretestBuildMode: shard.pretestBuildMode,
           predictedSeconds: shard.predictedSeconds,
         })),
-    ).toEqual([{ groups: ["agentic-cli"], pretestBuildMode: "runtime", predictedSeconds: 177 }]);
+    ).toEqual([
+      { groups: ["agentic-cli"], pretestBuildMode: "runtime", predictedSeconds: 177 },
+      {
+        groups: ["agentic-commands-doctor-config-state"],
+        pretestBuildMode: "runtime",
+        predictedSeconds: 158,
+      },
+    ]);
     const agentChatStripes = fallback
       .flatMap((shard) => shard.groups)
       .filter((group) => group.shard_name.startsWith("agentic-control-plane-agent-chat-hosted-"));
@@ -1037,6 +1044,8 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
     const qaConfig = "test/vitest/vitest.extension-qa.config.ts";
     const runtimeTargets = [
       "test/e2e/qa-lab/runtime/gateway-support-export-runtime.test.ts",
+      "src/commands/doctor-config-preflight.process.test.ts",
+      "src/commands/doctor-config-preflight.v17-atomicity.process.test.ts",
       "src/gateway/gateway-active-memory.test.ts",
       "src/gateway/gateway-concurrent-streams.test.ts",
       "src/gateway/gateway-cron-process-identity.windows.test.ts",

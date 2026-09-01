@@ -20,7 +20,7 @@ import type {
   WorkerDesktopEndpoint,
   WorkerProfile,
   WorkerSshEndpoint,
-} from "../../plugins/types.js";
+} from "../../plugins/capability-provider.types.js";
 import { isValidSecretRef } from "../../secrets/ref-contract.js";
 import { ensureWorkerEnvironmentNodeEnrollmentSchema } from "../../state/openclaw-state-db-schema-additive.js";
 import type {

@@ -165,6 +165,7 @@ export function createHarness(
       log.push("placement:requested");
       return placementStore.startDispatch(params);
     },
+    bindPreparedEnvironment: (params) => placementStore.bindPreparedEnvironment(params),
     transition: (params) => {
       log.push(`placement:${params.to}`);
       return placementStore.transition(params);
@@ -338,6 +339,14 @@ export function createHarness(
   };
   const environments: WorkerDispatchEnvironmentService = {
     supportsProviderExecutionMode: vi.fn(() => true),
+    assertPreparedIntentCurrent: vi.fn(),
+    prepareProjectIntent: vi.fn(async (_profileId, request) => ({
+      providerId: request?.inherited?.providerId ?? ready.providerId,
+      profileSnapshot: request?.inherited?.profileSnapshot ?? ready.profileSnapshot,
+    })),
+    getPreparedCandidates: vi.fn(() => []),
+    bindPreparedWorkspace: vi.fn(async () => {}),
+    schedulePreparedRefill: vi.fn(),
     create: vi.fn(async () => {
       fail("create");
       return currentEnvironment ?? ready;

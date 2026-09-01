@@ -18,6 +18,7 @@ import {
 import type { WorkerLiveEventReceiver } from "./live-events.js";
 import type { WorkerSessionTurnClaim } from "./placement-record.js";
 import type { WorkerSessionPlacementGate } from "./placement-worker-gate.js";
+import type { PreparedEnvironmentPlacementBinding } from "./prepared-environment-store.js";
 import type { WorkerEnvironmentState } from "./state.js";
 import {
   type WorkerEnvironmentRecord,
@@ -207,7 +208,10 @@ export function createWorkerCredentialBroker(options: WorkerCredentialBrokerOpti
   };
 
   const attachSession = async (
-    request: WorkerCredentialBinding & { sessionId: string },
+    request: WorkerCredentialBinding & {
+      sessionId: string;
+      placementBinding?: PreparedEnvironmentPlacementBinding;
+    },
   ): Promise<MintedWorkerCredential> => {
     let stopping = options.isStopping();
     if (stopping) {
@@ -248,6 +252,7 @@ export function createWorkerCredentialBroker(options: WorkerCredentialBrokerOpti
           from: current.state,
           to: "attached",
           expectedOwnerEpoch: request.ownerEpoch,
+          placementBinding: request.placementBinding,
           patch: {
             attachedSessionIds: [request.sessionId],
             credential: {

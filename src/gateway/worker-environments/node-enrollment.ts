@@ -18,6 +18,7 @@ import { WORKER_BOOTSTRAP_ARTIFACT_TRANSFER_PATH } from "../gateway-http-route-c
 import type { TransferArtifact } from "./artifact-transfer-service.js";
 import type { DeviceWorkerAvailability } from "./device-provider.js";
 import type { NodeBootstrapArtifact } from "./node-bootstrap-artifact.js";
+import { readWorkerProjectPreparation } from "./preparation-identity.js";
 import type { WorkerEnvironmentRecord, WorkerEnvironmentStore } from "./store.js";
 import type { WorkerBootstrapArtifactTransferService } from "./worker-bootstrap-artifact-transfer-service.js";
 
@@ -65,6 +66,10 @@ export function createWorkerNodeEnrollmentManager(options: WorkerNodeEnrollmentM
     preparationSignal.throwIfAborted();
     const artifact = await options.prepareArtifact(record, preparationSignal);
     preparationSignal.throwIfAborted();
+    const expected = readWorkerProjectPreparation(record.profileSnapshot.project);
+    if (expected && artifact.tarballSha256 !== expected.artifacts.nodeBootstrapSha256) {
+      throw new Error("Worker node runtime differs from its admitted preparation");
+    }
     const tlsFingerprint = url.url.startsWith("wss://")
       ? url.source?.startsWith("gateway.bind=")
         ? options.getLocalTlsFingerprint?.()
@@ -169,6 +174,10 @@ export function createWorkerNodeEnrollmentManager(options: WorkerNodeEnrollmentM
     try {
       const prepared = await prepare(record, enrollmentSignal);
       const owner = current();
+      const expected = readWorkerProjectPreparation(record.profileSnapshot.project);
+      if (expected && bundle.tarballSha256 !== expected.artifacts.workerArchiveSha256) {
+        throw new Error("Worker bundle differs from its admitted preparation");
+      }
       const isAuthorized = () => {
         const live = current();
         return live.nodeSetupId === owner.nodeSetupId && live.nodeDeviceId === owner.nodeDeviceId;

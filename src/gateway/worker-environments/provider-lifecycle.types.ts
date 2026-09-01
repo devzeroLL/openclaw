@@ -12,6 +12,8 @@ import type {
 import type { WorkerInstallationArtifact } from "./bundle.js";
 import type { WorkerCredentialBroker } from "./credential-broker.js";
 import type { WorkerSessionPlacementGate } from "./placement-worker-gate.js";
+import type { WorkerPreparationArtifacts } from "./preparation-identity.js";
+import type { createWorkerProjectPreparation } from "./project-preparation.js";
 import type { WorkerEnvironmentState } from "./state.js";
 import type {
   WorkerEnvironmentRecord,
@@ -21,6 +23,7 @@ import type {
 import type { WorkerTunnelStopReason } from "./tunnel-contract.js";
 
 export type WorkerProviderLifecycleInputOptions = {
+  now?: () => number;
   store: WorkerEnvironmentStore;
   getConfig: () => OpenClawConfig;
   resolveProvider: (providerId: string) => WorkerProvider | undefined;
@@ -46,6 +49,28 @@ export type WorkerProviderLifecycleInputOptions = {
     signal?: AbortSignal;
   }) => Promise<WorkerAdmissionHandshake>;
   prepareNodeBootstrap?: (record: WorkerEnvironmentRecord, signal?: AbortSignal) => Promise<void>;
+  prepareNodeArtifacts?: (
+    profileSnapshot: WorkerProfile,
+    signal?: AbortSignal,
+  ) => Promise<{ artifacts: WorkerPreparationArtifacts; assertCurrent: () => void }>;
+  registerPreparedWorkspace?: (params: {
+    record: WorkerEnvironmentRecord;
+    deviceId: string;
+    workspace: NonNullable<
+      ReturnType<ReturnType<typeof createWorkerProjectPreparation>["getPreparedWorkspace"]>
+    >;
+    assertCurrent: () => void;
+    signal?: AbortSignal;
+  }) => Promise<void>;
+  bindPreparedWorkspace?: (params: {
+    environmentId: string;
+    ownerEpoch: number;
+    sessionId: string;
+    sessionKey: string;
+    preparationKey: string;
+    signal?: AbortSignal;
+    assertCurrent: () => void;
+  }) => Promise<void>;
   prepareNodeRuntime?: (
     record: WorkerEnvironmentRecord,
     bundle: Extract<WorkerInstallationArtifact, { install: "bundle" }>,

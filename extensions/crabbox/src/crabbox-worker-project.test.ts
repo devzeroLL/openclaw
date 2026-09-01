@@ -22,7 +22,11 @@ type ProvisionOptions = NonNullable<Parameters<WorkerProvider["provision"]>[2]>;
 const PROJECT_KEY = "a".repeat(64);
 const BASE_COMMIT = "b".repeat(40);
 
-function projectOptions(events: string[], controller = new AbortController()) {
+function projectOptions(
+  events: string[],
+  controller = new AbortController(),
+  preparation?: { key: string; demandAtMs: number },
+) {
   let enrollmentStarted = false;
   const observe = ({ argv }: CommandCall) => {
     if (argv[1] === "run" && argv.includes("CRABBOX_WORKER_BOOTSTRAP_TOKEN")) {
@@ -37,6 +41,7 @@ function projectOptions(events: string[], controller = new AbortController()) {
     project: {
       key: PROJECT_KEY,
       baseCommit: BASE_COMMIT,
+      ...(preparation ? { preparation } : {}),
       signal: controller.signal,
       assertCurrent: () => controller.signal.throwIfAborted(),
       prepare: vi.fn<NonNullable<ProvisionOptions["project"]>["prepare"]>(async (transport) => {
@@ -72,6 +77,50 @@ function projectOptions(events: string[], controller = new AbortController()) {
 }
 
 describe("Crabbox project snapshot provisioning", () => {
+  it("reuses prepared setup without inventing demand during refill and reports ready consumption", async () => {
+    const events: string[] = [];
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    const preparation = { key: "c".repeat(64), demandAtMs: now };
+    const profile = { ...PROFILE, setup: "synthetic-profile-setup" };
+    let current = projectOptions(events, new AbortController(), preparation);
+    const { provider, calls } = createWarmProvider((call) => current.observe(call));
+    await provider.provision(profile, "prepared-source", current.options);
+    const cold = calls.find(({ argv }) => argv[1] === "warmup")!.argv;
+    expect(cold.slice(cold.indexOf("--target"))).toEqual(["--target", "linux", "--arch", "amd64"]);
+    clock.mockReturnValue(now + 60_000);
+    calls.length = 0;
+    current = projectOptions(events, new AbortController(), preparation);
+    const reserve = await provider.provision(profile, "prepared-reserve", current.options);
+    const fork = calls.find(({ argv }) => argv[2] === "fork")!.argv;
+    expect(fork.slice(fork.indexOf("--target"), -1)).toEqual([
+      "--target",
+      "linux",
+      "--arch",
+      "amd64",
+    ]);
+    expect(current.options.project.prepare).toHaveBeenCalledOnce();
+    expect(calls.some(({ options }) => options.input === profile.setup)).toBe(false);
+    expect(listCrabboxWarmImages()[0]?.lastDemandAtMs).toBe(now);
+    await provider.notePreparedDemand!(
+      { leaseId: reserve.leaseId, profile },
+      { preparationKey: preparation.key, demandAtMs: now + 60_000 },
+    );
+    expect(listCrabboxWarmImages()[0]?.lastDemandAtMs).toBe(now + 60_000);
+    expect(provider.resolvePreparedIdleTimeoutMs?.(profile)).toBe(3_600_000);
+    expect(provider.resolvePreparationTarget?.(profile, "fast")).toEqual({
+      machineClass: "fast",
+      platform: "linux",
+      arch: "x64",
+    });
+    expect(
+      provider.resolvePreparedIdleTimeoutMs?.({ ...profile, setupEnv: ["MUTABLE_INPUT"] }),
+    ).toBeUndefined();
+    expect(
+      provider.resolvePreparedIdleTimeoutMs?.({ ...profile, warmImage: false }),
+    ).toBeUndefined();
+  });
+
   it.each(["aws", "azure", "gcp"])(
     "settles a retained %s checkpoint before enrollment without repeating capture",
     async (backend) => {

@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -39,6 +39,10 @@ import {
   type NodeWorkerWorkspaceTransferInput,
 } from "../worker/node-workspace-transfer-protocol.js";
 import {
+  prepareNodeWorkerWorkspaceOverlay,
+  type NodeWorkerPreparedWorkspaceTransfer,
+} from "./node-worker-prepared-workspace-transfer.js";
+import {
   NodeWorkerTransferHttpError,
   openNodeWorkerTransferHttpRequest,
   type NodeWorkerTransferHttpRequest,
@@ -46,6 +50,10 @@ import {
 import { createNodeWorkerUploadSnapshot } from "./node-worker-upload-snapshot.js";
 import { captureManifest, runWorkspaceCommand } from "./node-worker-workspace-commands.js";
 import { initializeNodeWorkerGitWorkspace } from "./node-worker-workspace-git.js";
+import {
+  recoverWorkspaceReplacement,
+  replaceWorkspace,
+} from "./node-worker-workspace-replacement.js";
 import { copyNodeWorkerProjectSeedObjects } from "./node-worker-workspace-seeds.js";
 
 const TRANSFER_RESULT_MAX_BYTES = 64 * 1024;
@@ -192,97 +200,6 @@ export async function serializeNodeWorkerWorkspace<T>(
   }
 }
 
-async function removeTransferArtifact(target: string): Promise<void> {
-  await fsp.rm(target, {
-    recursive: true,
-    force: true,
-    maxRetries: process.platform === "win32" ? 5 : 0,
-    retryDelay: 100,
-  });
-}
-
-async function recoverWorkspaceReplacement(workspaceDir: string): Promise<void> {
-  const parent = path.dirname(workspaceDir);
-  const workspaceName = path.basename(workspaceDir);
-  await fsp.mkdir(parent, { recursive: true, mode: 0o700 });
-  const entries = await fsp.readdir(parent, { withFileTypes: true });
-  const stagingPrefix = `.${workspaceName}.workspace-transfer-`;
-  const staging = entries.filter((entry) => entry.name.startsWith(stagingPrefix));
-  const backups = entries.filter((entry) => entry.name.startsWith(`${workspaceName}.previous-`));
-  for (const entry of staging) {
-    if (entry.isDirectory() && !entry.isSymbolicLink()) {
-      await removeTransferArtifact(path.join(parent, entry.name));
-    }
-  }
-  const workspaceExists = await fsp
-    .lstat(workspaceDir)
-    .then((stats) => {
-      if (stats.isSymbolicLink() || !stats.isDirectory()) {
-        throw new Error("workspace transfer target is not an owned directory");
-      }
-      return true;
-    })
-    .catch((error: unknown) => {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        return false;
-      }
-      throw error;
-    });
-  const validBackups: string[] = [];
-  for (const entry of backups) {
-    if (entry.isDirectory() && !entry.isSymbolicLink()) {
-      validBackups.push(path.join(parent, entry.name));
-    }
-  }
-  if (!workspaceExists) {
-    if (validBackups.length > 1) {
-      throw new Error("workspace transfer recovery found multiple prior workspaces");
-    }
-    if (validBackups.length === 1) {
-      await fsp.rename(validBackups[0]!, workspaceDir);
-    }
-    return;
-  }
-  await Promise.all(
-    validBackups.map((backup) => removeTransferArtifact(backup).catch(() => undefined)),
-  );
-}
-
-async function replaceWorkspace(workspaceDir: string, staging: string): Promise<void> {
-  const backup = `${workspaceDir}.previous-${process.pid}-${randomUUID()}`;
-  let movedOld = false;
-  try {
-    await fsp.rename(workspaceDir, backup);
-    movedOld = true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw error;
-    }
-  }
-  try {
-    await fsp.rename(staging, workspaceDir);
-  } catch (error) {
-    if (movedOld) {
-      try {
-        await fsp.rename(backup, workspaceDir);
-      } catch (rollbackError) {
-        const recoveryError = new Error(`workspace transfer rollback failed; recover ${backup}`, {
-          cause: error,
-        });
-        Object.defineProperty(recoveryError, "rollbackError", {
-          value: rollbackError,
-        });
-        throw recoveryError;
-      }
-    }
-    throw error;
-  }
-  if (movedOld) {
-    // The second rename is the commit point. Cleanup failure is recovered on the next transfer.
-    await removeTransferArtifact(backup).catch(() => undefined);
-  }
-}
-
 async function downloadWorkspace(params: {
   seedsRoot?: string;
   gatewayNamespace?: string;
@@ -293,6 +210,7 @@ async function downloadWorkspace(params: {
   workspaceDir: string;
   manifestHome: string;
   transfer: Extract<NodeWorkerWorkspaceTransferInput, { direction: "download" }>;
+  prepared?: NodeWorkerPreparedWorkspaceTransfer;
   hashMemo?: WorkspaceHashMemo;
   signal?: AbortSignal;
 }): Promise<string> {
@@ -318,6 +236,16 @@ async function downloadWorkspace(params: {
   if (params.transfer.seedKey && (!manifest.baseCommit || params.transfer.attachments)) {
     throw new Error("Prepared project seeds require a Git workspace transfer");
   }
+  const overlay =
+    params.prepared && !params.transfer.attachments
+      ? await prepareNodeWorkerWorkspaceOverlay({
+          prepared: params.prepared,
+          manifest,
+          manifestRef: params.transfer.manifestRef,
+          hashMemo: params.hashMemo,
+          signal: params.signal,
+        })
+      : undefined;
   const stagedInputs = stagedInputDirectoriesFromEntries(manifest.entries);
   if (
     params.transfer.attachments &&
@@ -354,7 +282,7 @@ async function downloadWorkspace(params: {
         throw new Error("workspace transfer manifest publication acknowledgement is invalid");
       }
     }
-    if (manifest.baseCommit) {
+    if (manifest.baseCommit && !overlay) {
       try {
         let seeded = false;
         if (params.transfer.seedKey) {
@@ -421,6 +349,9 @@ async function downloadWorkspace(params: {
     }
     await withWorkerWorkspaceHashMemo(stagingHashMemo, async () => {
       for (const entry of manifest.entries) {
+        if (overlay && !overlay.changed.has(entry.path)) {
+          continue;
+        }
         const destination = workspacePath(staging, entry.path);
         const materializedEntry =
           process.platform === "win32" && entry.type === "file" && entry.mode === 0o755
@@ -458,14 +389,16 @@ async function downloadWorkspace(params: {
     const blobApplyMs = performance.now() - blobApplyStartedAt;
     // Reuse only hashes validated on this staging filesystem. Capture still checks
     // the complete tree and current handle identities before the atomic replacement.
-    const observed = await captureManifest({
-      workspaceDir: staging,
-      manifestHome: params.manifestHome,
-      baseCommit: manifest.baseCommit,
-      referenceManifestRef: params.transfer.manifestRef,
-      hashMemo: stagingHashMemo,
-      signal: params.signal,
-    });
+    const observed = overlay
+      ? await overlay.apply(staging)
+      : await captureManifest({
+          workspaceDir: staging,
+          manifestHome: params.manifestHome,
+          baseCommit: manifest.baseCommit,
+          referenceManifestRef: params.transfer.manifestRef,
+          hashMemo: stagingHashMemo,
+          signal: params.signal,
+        });
     if (observed !== params.transfer.manifestRef) {
       throw new Error(
         `workspace transfer materialized a different manifest (${observed}/${params.transfer.manifestRef})`,
@@ -496,10 +429,10 @@ async function downloadWorkspace(params: {
         }
         params.signal?.throwIfAborted();
       }
-    } else {
+    } else if (!overlay) {
       await replaceWorkspace(params.workspaceDir, staging);
     }
-    if (params.hashMemo) {
+    if (params.hashMemo && !overlay) {
       replaceWorkerWorkspaceHashMemoEntries(params.hashMemo, [...stagingHashMemo]);
     }
     transferLog.debug("node worker workspace transfer completed", {
@@ -640,11 +573,14 @@ export async function runNodeWorkerWorkspaceTransfer(params: {
   workspaceDir: string;
   manifestHome: string;
   transfer: NodeWorkerWorkspaceTransferInput;
+  prepared?: NodeWorkerPreparedWorkspaceTransfer;
   hashMemo?: WorkspaceHashMemo;
   signal?: AbortSignal;
 }): Promise<string> {
   try {
-    await recoverWorkspaceReplacement(params.workspaceDir);
+    if (!params.prepared) {
+      await recoverWorkspaceReplacement(params.workspaceDir);
+    }
     return params.transfer.direction === "download"
       ? await downloadWorkspace({
           ...params,

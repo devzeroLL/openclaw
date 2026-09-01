@@ -138,6 +138,7 @@ export function createDispatchEnvironmentFixtures(generation = 1) {
     stateChangedAtMs: 1,
     idleSinceAtMs: null,
     destroyRequestedAtMs: null,
+    preparation: null,
     leaseId: "lease-1",
     sshEndpoint,
     desktop: null,

@@ -29,6 +29,7 @@ export type NodeWorkerWorkspaceBinding = {
   localPath: string;
   manifestRef: string;
   remoteWorkspaceDir: string;
+  sessionKey?: string;
 };
 
 type NodeWorkerWorkspaceActions = Pick<
@@ -38,7 +39,10 @@ type NodeWorkerWorkspaceActions = Pick<
   | "quiesceWorkspace"
   | "reconcileWorkspace"
   | "stageAttachments"
-> & { validateRestoredWorkspace: () => Promise<void> };
+> & {
+  validateRestoredWorkspace: () => Promise<void>;
+  getSessionKey: () => string | undefined;
+};
 
 export function createNodeWorkerWorkspaceActions(params: {
   environmentId: string;
@@ -49,16 +53,20 @@ export function createNodeWorkerWorkspaceActions(params: {
   restoredWorkspace?: NodeWorkerWorkspaceBinding;
   workspaceTransfer: NodeWorkspaceTransferService;
   runWorkspaceCommand: (
-    command: WorkerWorkspaceCommand & { resetWorkspace?: boolean },
+    command: WorkerWorkspaceCommand & { resetWorkspace?: boolean; sessionKey?: string },
   ) => Promise<NodeWorkerWorkspaceExecResult>;
 }): NodeWorkerWorkspaceActions {
   const { restoredWorkspace } = params;
   let workspaceReady = restoredWorkspace !== undefined;
+  let sessionKey = restoredWorkspace?.sessionKey;
   const exec = async (command: WorkerWorkspaceCommand & { resetWorkspace?: boolean }) => {
     if (!workspaceReady) {
       throw new Error("node worker workspace is unavailable before sync");
     }
-    return await params.runWorkspaceCommand(command);
+    return await params.runWorkspaceCommand({
+      ...command,
+      ...(sessionKey === undefined ? {} : { sessionKey }),
+    });
   };
   const workspace = createNodeWorkerWorkspaceFallback(exec);
   const quiesceWorkspace = createWorkerWorkspaceQuiescence({
@@ -243,6 +251,7 @@ export function createNodeWorkerWorkspaceActions(params: {
   };
   return {
     validateRestoredWorkspace,
+    getSessionKey: () => sessionKey,
     runWorkspaceCommand: exec,
     stageAttachments: async (request) => {
       const prepared = await params.workspaceTransfer.prepareAttachments({
@@ -278,6 +287,15 @@ export function createNodeWorkerWorkspaceActions(params: {
       }
     },
     syncWorkspace: async (request) => {
+      if (
+        request.sessionId !== params.sessionId ||
+        (sessionKey !== undefined && request.sessionKey !== sessionKey)
+      ) {
+        throw new Error("node workspace sync does not match its session owner");
+      }
+      // The placement key survives subsequent commands and tunnel recovery; callers cannot
+      // replace a prepared workspace's bound identity by sending a different command payload.
+      sessionKey = request.sessionKey;
       workspaceReady = true;
       try {
         const prepared = await params.workspaceTransfer.prepareSync({

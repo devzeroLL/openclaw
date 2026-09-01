@@ -231,108 +231,113 @@ describe("worker placement dispatch reclaim", () => {
     expect(placementStore.getPlacementMove(REQUEST.sessionId)).toBeUndefined();
   });
 
-  it("carries session authorization from move source teardown into destination dispatch", async () => {
-    const harness = createHarness(placementStore, {
-      reconcileChanged: false,
-      reconcileCommitsManifest: false,
-    });
-    const active = await harness.service.dispatch(REQUEST);
-    database.db
-      .prepare(
-        `INSERT INTO worker_environments (
+  it.each([false, true])(
+    "carries session and setup authorization through a move (setup=%s)",
+    async (setupAuthorized) => {
+      const harness = createHarness(placementStore, {
+        reconcileChanged: false,
+        reconcileCommitsManifest: false,
+      });
+      const active = await harness.service.dispatch(REQUEST);
+      database.db
+        .prepare(
+          `INSERT INTO worker_environments (
           environment_id, provider_id, profile_id, profile_snapshot_json,
           provision_operation_id, lease_id, state, owner_epoch,
           attached_session_ids_json, created_at_ms, updated_at_ms, state_changed_at_ms
         ) VALUES (?, 'test', ?, '{}', ?, 'lease-move-auth', 'attached', ?, ?, 1000, 1000, 1000)`,
-      )
-      .run(
-        active.environmentId,
-        REQUEST.profileId,
-        `provision:${active.environmentId}`,
-        active.activeOwnerEpoch,
-        JSON.stringify([active.sessionId]),
-      );
-    let authorizationChecks = 0;
-    const authorize = vi.fn(() => {
-      authorizationChecks += 1;
-      if (authorizationChecks === 3) {
-        throw new Error("session access revoked");
-      }
-    });
-    const destinationDispatch = vi.fn(
-      async (
-        _request: Parameters<ReturnType<typeof createHarness>["service"]["dispatch"]>[0],
-        _onTransition: Parameters<ReturnType<typeof createHarness>["service"]["dispatch"]>[1],
-        destinationAuthorize: Parameters<
-          ReturnType<typeof createHarness>["service"]["dispatch"]
-        >[2],
-      ) => {
-        destinationAuthorize?.();
-        throw new Error("destination dispatch lost authorization");
-      },
-    );
-    const service = createWorkerPlacementMoveService({
-      placements: placementStore,
-      environments: { get: () => undefined },
-      runMoveBarrier: async ({ authorize: sourceAuthorize, begin }) => {
-        sourceAuthorize?.();
-        return begin();
-      },
-      dispatch: destinationDispatch,
-      reclaimSource: async (_request, intent, sourceAuthorize) => {
-        sourceAuthorize?.();
-        const draining = placementStore.get(intent.sessionId);
-        if (draining?.state !== "draining") {
-          throw new Error("move source did not enter draining state");
+        )
+        .run(
+          active.environmentId,
+          REQUEST.profileId,
+          `provision:${active.environmentId}`,
+          active.activeOwnerEpoch,
+          JSON.stringify([active.sessionId]),
+        );
+      let authorizationChecks = 0;
+      const authorize = vi.fn(() => {
+        authorizationChecks += 1;
+        if (authorizationChecks === 3) {
+          throw new Error("session access revoked");
         }
-        const reconciling = placementStore.startReconcile({
-          sessionId: draining.sessionId,
-          environmentId: draining.environmentId,
-          ownerEpoch: draining.activeOwnerEpoch,
-          expectedGeneration: draining.generation,
-        });
-        const local = placementStore.completePlacementMoveSourceToLocal({
-          operationId: intent.operationId,
-          sessionId: intent.sessionId,
-          expectedGeneration: reconciling.generation,
-        });
-        if (local.state !== "local") {
-          throw new Error("move source did not return to local state");
-        }
-        return local;
-      },
-      validateAbandonSource: vi.fn(),
-      abandonSource: vi.fn(async () => {
-        throw new Error("unexpected source abandonment");
-      }),
-      resolveDestination: async () => ({
-        profileId: "destination-profile",
-        executionMode: REQUEST.executionMode,
-      }),
-    });
-
-    await expect(
-      service.move(
-        {
-          sessionId: active.sessionId,
-          sessionKey: active.sessionKey,
-          agentId: active.agentId,
-          source: {
-            generation: active.generation,
-            environmentId: active.environmentId,
-            ownerEpoch: active.activeOwnerEpoch,
-          },
-          target: { kind: "profile", profileId: "destination-profile" },
+      });
+      const destinationDispatch = vi.fn(
+        async (
+          _request: Parameters<ReturnType<typeof createHarness>["service"]["dispatch"]>[0],
+          _onTransition: Parameters<ReturnType<typeof createHarness>["service"]["dispatch"]>[1],
+          destinationAuthorize: Parameters<
+            ReturnType<typeof createHarness>["service"]["dispatch"]
+          >[2],
+        ) => {
+          destinationAuthorize?.();
+          throw new Error("destination dispatch lost authorization");
         },
-        undefined,
-        authorize,
-      ),
-    ).rejects.toThrow("session access revoked");
+      );
+      const service = createWorkerPlacementMoveService({
+        placements: placementStore,
+        environments: { get: () => undefined },
+        runMoveBarrier: async ({ authorize: sourceAuthorize, begin }) => {
+          sourceAuthorize?.();
+          return begin();
+        },
+        dispatch: destinationDispatch,
+        reclaimSource: async (_request, intent, sourceAuthorize) => {
+          sourceAuthorize?.();
+          const draining = placementStore.get(intent.sessionId);
+          if (draining?.state !== "draining") {
+            throw new Error("move source did not enter draining state");
+          }
+          const reconciling = placementStore.startReconcile({
+            sessionId: draining.sessionId,
+            environmentId: draining.environmentId,
+            ownerEpoch: draining.activeOwnerEpoch,
+            expectedGeneration: draining.generation,
+          });
+          const local = placementStore.completePlacementMoveSourceToLocal({
+            operationId: intent.operationId,
+            sessionId: intent.sessionId,
+            expectedGeneration: reconciling.generation,
+          });
+          if (local.state !== "local") {
+            throw new Error("move source did not return to local state");
+          }
+          return local;
+        },
+        validateAbandonSource: vi.fn(),
+        abandonSource: vi.fn(async () => {
+          throw new Error("unexpected source abandonment");
+        }),
+        resolveDestination: async () => ({
+          profileId: "destination-profile",
+          executionMode: REQUEST.executionMode,
+        }),
+      });
 
-    expect(authorize).toHaveBeenCalledTimes(3);
-    expect(destinationDispatch).toHaveBeenCalledOnce();
-    expect(placementStore.get(active.sessionId)).toMatchObject({ state: "local" });
-  });
+      await expect(
+        service.move(
+          {
+            sessionId: active.sessionId,
+            sessionKey: active.sessionKey,
+            agentId: active.agentId,
+            source: {
+              generation: active.generation,
+              environmentId: active.environmentId,
+              ownerEpoch: active.activeOwnerEpoch,
+            },
+            target: { kind: "profile", profileId: "destination-profile" },
+            setupAuthorized,
+          },
+          undefined,
+          authorize,
+        ),
+      ).rejects.toThrow("session access revoked");
+
+      expect(authorize).toHaveBeenCalledTimes(3);
+      expect(destinationDispatch).toHaveBeenCalledOnce();
+      expect(destinationDispatch.mock.calls[0]?.[0]).toMatchObject({ setupAuthorized });
+      expect(placementStore.get(active.sessionId)).toMatchObject({ state: "local" });
+    },
+  );
 
   it("recovers a durable Gateway move intent before generic draining recovery", async () => {
     const harness = createHarness(placementStore, {

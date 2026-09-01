@@ -23,6 +23,7 @@ export function environment(): WorkerEnvironmentRecord {
     providerId: "device",
     profileId: "device:node-1",
     profileSnapshot: { settings: { device: "node-1" } },
+    preparation: null,
     provisionOperationId: "provision-1",
     nodeSetupId: null,
     nodeDeviceId: "node-1",
@@ -41,6 +42,32 @@ export function environment(): WorkerEnvironmentRecord {
     state: "attached",
     leaseId: "device-lease",
     sshEndpoint: null,
+  };
+}
+
+export function preparedEnvironment(): WorkerEnvironmentRecord {
+  const record = environment();
+  return {
+    ...record,
+    sharedHost: false,
+    profileSnapshot: {
+      ...record.profileSnapshot,
+      project: {
+        preparation: {
+          key: "b".repeat(64),
+          contractVersion: 1,
+          target: { machineClass: "test", platform: "linux", arch: "x64" },
+          artifacts: {
+            nodeBootstrapSha256: "c".repeat(64),
+            enabledPluginIds: [],
+            workerBundleHash: BUILD.bundleHash,
+            workerArchiveSha256: "e".repeat(64),
+            openclawVersion: BUILD.openclawVersion,
+            protocolFeatures: BUILD.protocolFeatures,
+          },
+        },
+      },
+    },
   };
 }
 

@@ -11,6 +11,20 @@ const request = {
 const key = "a".repeat(64);
 
 describe("node workspace seed protocol", () => {
+  it("carries the exact prepared identity and session key", () => {
+    const prepared = { ...request, preparationKey: key, sessionKey: "agent:test:prepared" };
+    expect(parseNodeWorkerWorkspaceExecInput(JSON.stringify(prepared))).toEqual(prepared);
+  });
+
+  it.each(["../outside", "A".repeat(64), "", null])(
+    "rejects malformed preparation identity %j",
+    (preparationKey) => {
+      expect(() =>
+        parseNodeWorkerWorkspaceExecInput(JSON.stringify({ ...request, preparationKey })),
+      ).toThrow("preparationKey");
+    },
+  );
+
   const download = {
     direction: "download",
     token: "token",

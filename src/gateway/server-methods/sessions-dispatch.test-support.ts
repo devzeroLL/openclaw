@@ -46,10 +46,12 @@ vi.mock("../session-utils.js", async () => {
 
 import { sessionDispatchHandlers } from "./sessions-dispatch.js";
 
-export function getSessionDispatchHandler() {
+export function getSessionDispatchHandler(
+  method: "sessions.dispatch" | "sessions.move" = "sessions.dispatch",
+) {
   return expectDefined(
-    sessionDispatchHandlers["sessions.dispatch"],
-    'sessionDispatchHandlers["sessions.dispatch"] test invariant',
+    sessionDispatchHandlers[method],
+    `sessionDispatchHandlers["${method}"] test invariant`,
   );
 }
 

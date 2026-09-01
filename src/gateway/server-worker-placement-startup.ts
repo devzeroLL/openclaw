@@ -219,6 +219,7 @@ export function createGatewayWorkerPlacementRuntime(
         agentId: placement.agentId,
       }),
       manifestRef: placement.workspaceBaseManifestRef,
+      sessionKey: placement.sessionKey,
       remoteWorkspaceDir: placement.remoteWorkspaceDir,
     };
   };

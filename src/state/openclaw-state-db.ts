@@ -65,6 +65,7 @@ import {
   markCurrentStateSchemaVersion,
   migrateConversationBindingTargets,
   migrateCronCreatorNamespaces,
+  migratePreparedWorkerOwnership,
   openClawStateMigrationAssertions,
   resolveDatabasePath,
 } from "./openclaw-state-db-maintenance.js";
@@ -139,13 +140,6 @@ function assertOpenClawStateDatabaseFreshOpenAllowed(
 
 type OpenClawStateMetadataDatabase = Pick<OpenClawStateKyselyDatabase, "schema_meta">;
 const stateDbLog = createSubsystemLogger("state/db");
-
-function executeCanonicalStateSchema(
-  database: DatabaseSync,
-  options: { includeVersionLazyAdditiveTables: boolean },
-): void {
-  database.exec(getOpenClawStateRuntimeSchema(options));
-}
 
 function repairStateSchema(
   pathname: string,
@@ -225,9 +219,14 @@ function repairStateSchema(
           if (migrateConversationBindingTargets(db, previousVersion)) {
             applied.push("Removed redundant conversation binding target projections (v15)");
           }
-          executeCanonicalStateSchema(db, {
-            includeVersionLazyAdditiveTables: previousVersion !== OPENCLAW_STATE_SCHEMA_VERSION,
-          });
+          if (migratePreparedWorkerOwnership(db, previousVersion)) {
+            applied.push("Recorded prepared worker ownership and one-use lifecycle (v16)");
+          }
+          db.exec(
+            getOpenClawStateRuntimeSchema({
+              includeVersionLazyAdditiveTables: previousVersion !== OPENCLAW_STATE_SCHEMA_VERSION,
+            }),
+          );
           if (previousVersion < OPENCLAW_STATE_STRICT_SCHEMA_VERSION) {
             repairLegacyGatewayRestartHandoffsForStrictMigration(db);
             ensureFirstUseAdditiveStateColumnsForStrictMigration(db);
@@ -419,11 +418,14 @@ function ensureSchema(
           migrateJsonCanonicalWideRowsV13(db, previousVersion);
           migrateCronCreatorNamespaces(db, previousVersion);
           migrateConversationBindingTargets(db, previousVersion);
+          migratePreparedWorkerOwnership(db, previousVersion);
           sessionWatchMigration.migrateSessionWatchCursorProvenance(db);
           assertCanonicalStateSchemaShape(db, pathname);
-          executeCanonicalStateSchema(db, {
-            includeVersionLazyAdditiveTables: previousVersion !== OPENCLAW_STATE_SCHEMA_VERSION,
-          });
+          db.exec(
+            getOpenClawStateRuntimeSchema({
+              includeVersionLazyAdditiveTables: previousVersion !== OPENCLAW_STATE_SCHEMA_VERSION,
+            }),
+          );
           migrateLegacyCronRunLogsToTaskRuns(db);
           if (previousVersion < OPENCLAW_STATE_STRICT_SCHEMA_VERSION) {
             repairLegacyGatewayRestartHandoffsForStrictMigration(db);

@@ -84,6 +84,7 @@ export function createHarness(sharedHost = false, withPolicy = true) {
     providerId: sharedHost ? "device" : "fixture-cloud",
     profileId: "desktop",
     profileSnapshot: { settings: {} },
+    preparation: null,
     provisionOperationId: "provision-1",
     nodeSetupId: null,
     nodeDeviceId: "desktop-node",

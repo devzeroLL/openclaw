@@ -8,6 +8,8 @@ import {
 } from "./admission.js";
 import type { WorkerNodeDesktopCarrier } from "./node-desktop-carrier.js";
 import type { NodeWorkerTunnelManager } from "./node-worker-tunnel.js";
+import { readWorkerProjectPreparation } from "./preparation-identity.js";
+import type { WorkerProviderLifecycleInputOptions } from "./provider-lifecycle.types.js";
 import type { WorkerDesktopLaunchResult, WorkerDesktopObserveResult } from "./service-contract.js";
 import type { WorkerEnvironmentState } from "./state.js";
 import type { WorkerEnvironmentRecord, WorkerEnvironmentStore } from "./store.js";
@@ -21,6 +23,7 @@ type WorkerEnvironmentAccessOptions = {
   store: WorkerEnvironmentStore;
   getConfig: () => OpenClawConfig;
   prepareCurrentBundle: () => Promise<ExpectedWorkerBuild>;
+  bindPreparedWorkspace?: WorkerProviderLifecycleInputOptions["bindPreparedWorkspace"];
   tunnelManager?: WorkerTunnelManager;
   nodeTunnelManager?: NodeWorkerTunnelManager;
   nodeDesktopCarrier?: WorkerNodeDesktopCarrier;
@@ -76,6 +79,35 @@ export function createWorkerEnvironmentAccess(options: WorkerEnvironmentAccessOp
           ? nodeTunnelStatus
           : (tunnels?.status(record.environmentId) ?? nodeTunnelStatus ?? ("stopped" as const)),
     };
+  };
+
+  const bindPreparedWorkspace = async (
+    request: Parameters<NonNullable<WorkerEnvironmentAccessOptions["bindPreparedWorkspace"]>>[0],
+  ) => {
+    const bind = options.bindPreparedWorkspace;
+    const assertCurrent = () => {
+      request.signal?.throwIfAborted();
+      request.assertCurrent();
+      const record = store.get(request.environmentId);
+      if (
+        options.isStopping() ||
+        record?.state !== "attached" ||
+        record.ownerEpoch !== request.ownerEpoch ||
+        record.attachedSessionIds.length !== 1 ||
+        record.attachedSessionIds[0] !== request.sessionId ||
+        record.destroyRequestedAtMs !== null ||
+        record.sharedHost !== false ||
+        readWorkerProjectPreparation(record.profileSnapshot.project)?.key !== request.preparationKey
+      ) {
+        throw new Error("Prepared workspace lost its exact attached environment owner");
+      }
+    };
+    assertCurrent();
+    if (!bind) {
+      throw new Error("Prepared workspace node transport is unavailable");
+    }
+    await bind({ ...request, assertCurrent });
+    assertCurrent();
   };
 
   const startTunnel = async (request: WorkerTunnelRequest): Promise<WorkerTunnelHandle> => {
@@ -440,6 +472,7 @@ export function createWorkerEnvironmentAccess(options: WorkerEnvironmentAccessOp
       const record = store.get(environmentId);
       return record ? project(record) : undefined;
     },
+    bindPreparedWorkspace,
     launchDesktopApp,
     list: () => store.list().map(project),
     observeDesktop,

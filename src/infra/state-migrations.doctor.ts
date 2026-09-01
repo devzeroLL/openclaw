@@ -200,6 +200,8 @@ function describeStateSchemaMigration(migration: OpenClawStateDatabaseSchemaMigr
       return "historical cron creators → unknown source attribution";
     case "conversation-binding-targets-v15":
       return "conversation bindings → exact target keys without agent/session projections";
+    case "prepared-worker-ownership-v16":
+      return "prepared workers → one-use capacity and fixed workspace ownership";
     case "operator-approvals-system-agent":
       return "operator approvals → OpenClaw system changes";
     case "session-watch-cursor-provenance-v4":

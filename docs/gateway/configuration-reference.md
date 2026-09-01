@@ -985,10 +985,12 @@ The bundled `crabbox` provider provisions a disposable machine through the local
     },
   },
   cloudWorkers: {
+    preparedPool: { maxTotal: 4 },
     profiles: {
       production: {
         provider: "crabbox",
         suspendAfter: "45m",
+        readyWorkers: 1,
         settings: {
           provider: "aws",
           class: "standard",
@@ -1005,7 +1007,7 @@ The bundled `crabbox` provider provisions a disposable machine through the local
 
 - `settings.provider` (required): backend from the [Crabbox provider reference](https://crabbox.sh/providers/index.html), passed through `--provider`. Direct or coordinator-backed operation follows Crabbox's configuration.
 - `settings.class`: optional Crabbox machine class passed to `--class`. Omission leaves selection to Crabbox unless the placement supplies `machineClass`; OpenClaw does not invent a default or hardware size. Explicit `null`, empty or whitespace strings, and nonstring values are invalid. Edit classless profiles through **Settings → Advanced**.
-- `settings.ttl` and `settings.idleTimeout` (required): positive Go duration strings passed to `--ttl` and `--idle-timeout` as provider-side failsafes.
+- `settings.ttl` and `settings.idleTimeout` (required): positive Go duration strings passed to `--ttl` and `--idle-timeout`. The existing `idleTimeout` also sets a prepared reserve's fixed expiry from actual project demand. Confirmed cleanup can be delayed when its Gateway or provider cleanup owner is unavailable; these fields do not guarantee autonomous deletion on every backend.
 - `settings.warmImage`: prepares a project's committed checkout and node runtime for capture before enrollment, then starts later workers for that project and profile from the image. Without a prepared Git project, capture remains at eligible worker teardown. Pair with `suspendAfter` so suspended sessions can wake warm. Enabled by default when a configured or placement class is known and `setupEnv` is empty or omitted. Without an effective class, omission stays cold. A nonempty `setupEnv` keeps the default cold because forwarded host environment could leave setup-derived credentials in a shared image. Explicit `true` opts in but requires a known effective class before provider commands; explicit `false` always stays cold. The resolved class and original cold/checkpoint choice are recorded before allocation and remain fixed through retries and restart. Images incur provider snapshot storage charges and retain machine-level caches, including pristine Git seeds, alongside whatever `setup` wrote outside scrubbed worker state. Scrubbing has a three-minute timeout; checkpoint creation has a separate three-minute timeout, ten on `machine0`. An uncertain project capture blocks enrollment on its source but still permits lease cleanup. See [Warm images](/gateway/cloud-workers#warm-images) for refresh, retention, and Doctor migration and recovery.
 - `settings.binary`: optional absolute Crabbox executable path. Without it, OpenClaw checks the sibling Crabbox checkout, then executable entries on `PATH`, and finally invokes `crabbox` so a missing CLI remains a visible provider error.
 
@@ -1045,9 +1047,11 @@ Crabbox setup uses an environment-owned one-use pairing credential and the confi
 ```
 
 - `profiles`: named worker profiles with non-empty, whitespace-trimmed ids. Each profile selects a provider registered by a plugin.
+- `preparedPool.maxTotal`: nonnegative integer cap on unassigned prepared workers across all projects and profiles; default `4`. Includes workers still preparing and reserve cleanup not yet confirmed. `0` disables replenishment and drains unassigned reserves while preserving snapshot reuse and active sessions.
 - `provider`: non-empty worker provider id. The examples use the bundled `crabbox` provider and the QA Lab `static-ssh` provider.
 - `install`: SSH-backed `remote-exec` worker installation method. `"bundle"` (default) transfers a content-hashed bundle of the gateway's installed build and supports released, development, and unreleased versions. `"npm"` is an opt-in optimization for an unmodified packaged release; it installs `openclaw@<exact gateway version>` from the public npm registry and never installs `latest`. Node-backed `worker-turn` and `remote-exec` providers install the pinned Gateway bundle through node transport instead.
 - `suspendAfter`: optional profile-level duration such as `45m`, `90m`, or `2h`; minimum `1m`. The Gateway safely reclaims the worker after its session stays idle for this long. The next message provisions a replacement, warm when an image exists. Omit this field to keep workers running until explicitly stopped.
+- `readyWorkers`: nonnegative integer target of unassigned prepared workers per eligible project using this profile; default `1`, subject to `preparedPool.maxTotal`. Pending preparation and unconfirmed reserve cleanup count toward the target. `0` disables reserves for that profile while preserving snapshot reuse. Each ready worker can be assigned only once. See [Ready workers](/gateway/cloud-workers#ready-workers) for eligibility, demand-based expiry, running-machine charges, and configuration changes.
 - Bundled provider plugins are selected automatically when configured, but explicit disables and `plugins.allow` still apply. Include the provider id (for example, `crabbox`) when an allowlist is configured. External provider plugins must also be installed and explicitly enabled.
 - `settings`: provider-owned bounded JSON. The selected plugin defines and validates its keys; use [SecretRef objects](/gateway/secrets) for secret-bearing values. The static SSH provider requires `host`, `user`, `hostKey`, and `keyRef`; `port` defaults to `22`. `hostKey` must be one OpenSSH public host-key line (`algorithm base64`) obtained from the known host or another trusted channel, with no options prefix.
 

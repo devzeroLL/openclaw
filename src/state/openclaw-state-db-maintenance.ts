@@ -4,6 +4,7 @@ import {
   assertSqliteSchemaContains,
   assertSqliteSchemaTablesPresent,
 } from "../infra/sqlite-schema-contract.js";
+import { splitSqlList } from "../infra/sqlite-schema-sql.js";
 import {
   createNewerSqliteSchemaVersionError,
   readSqliteUserVersion,
@@ -14,7 +15,7 @@ import {
   OPENCLAW_STATE_SCHEMA_VERSION,
   type OpenClawStateDatabaseOptions,
 } from "./openclaw-state-db-contract.js";
-import { tableExists, tableHasColumn } from "./openclaw-state-db-schema-helpers.js";
+import { ensureColumn, tableExists, tableHasColumn } from "./openclaw-state-db-schema-helpers.js";
 import { resolveOpenClawStateSqlitePath } from "./openclaw-state-db.paths.js";
 import { OPENCLAW_STATE_MAINTENANCE_SCHEMA_COMPATIBILITY } from "./openclaw-state-schema-compatibility.js";
 import { OPENCLAW_STATE_SCHEMA_SQL } from "./openclaw-state-schema.js";
@@ -56,6 +57,7 @@ const STATE_MIGRATION_ALLOWED_MISSING_TABLES = {
   12: STATE_V6_ADDITIVE_TABLES,
   13: LAZY_ADDITIVE_STATE_TABLES,
   14: LAZY_ADDITIVE_STATE_TABLES,
+  15: LAZY_ADDITIVE_STATE_TABLES,
 } as const satisfies Record<number, readonly string[]>;
 type OpenClawStateMigrationVersion = keyof typeof STATE_MIGRATION_ALLOWED_MISSING_TABLES;
 
@@ -257,6 +259,11 @@ export const openClawStateMigrationAssertions = new Map([
     (database: DatabaseSync, options: { pathname: string }) =>
       assertOpenClawStateDatabaseVersionForMigration(database, { ...options, version: 14 }),
   ],
+  [
+    15,
+    (database: DatabaseSync, options: { pathname: string }) =>
+      assertOpenClawStateDatabaseVersionForMigration(database, { ...options, version: 15 }),
+  ],
 ]);
 
 export function markCurrentStateSchemaVersion(
@@ -335,4 +342,27 @@ export function migrateConversationBindingTargets(
     db.exec(`ALTER TABLE current_conversation_bindings DROP COLUMN ${column};`);
   }
   return true;
+}
+
+/** Add the canonical preparation tuple without rebuilding the referenced environment table. */
+export function migratePreparedWorkerOwnership(db: DatabaseSync, previousVersion: number): boolean {
+  if (previousVersion >= 16 || !tableExists(db, "worker_environments")) {
+    return false;
+  }
+  const marker = "CREATE TABLE IF NOT EXISTS worker_environments (";
+  const start = OPENCLAW_STATE_SCHEMA_SQL.indexOf(marker);
+  const end = OPENCLAW_STATE_SCHEMA_SQL.indexOf("\n) STRICT;", start);
+  if (start < 0 || end < start) {
+    throw new Error("OpenClaw worker environment schema marker is missing.");
+  }
+  const columns = splitSqlList(OPENCLAW_STATE_SCHEMA_SQL.slice(start + marker.length, end))
+    .map((column) => column.trim())
+    .filter((column) => column.startsWith("preparation_"));
+  let changed = false;
+  // The final column carries the cross-column CHECK. All additions and schema
+  // markers commit together, preserving inbound foreign keys and cleanup rows.
+  for (const column of columns) {
+    changed = ensureColumn(db, "worker_environments", column) || changed;
+  }
+  return changed;
 }

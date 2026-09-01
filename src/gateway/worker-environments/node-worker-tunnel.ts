@@ -43,6 +43,7 @@ import {
 } from "./node-worker-workspace-actions.js";
 import type { NodeWorkspaceTransferService } from "./node-workspace-transfer-service.js";
 import type { WorkerSessionTurnClaim } from "./placement-record.js";
+import { readWorkerProjectPreparation } from "./preparation-identity.js";
 import type { WorkerEnvironmentRecord } from "./store.js";
 import {
   WorkerTunnelOwnerDisconnectedError,
@@ -171,6 +172,11 @@ export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOp
   const isEnvironmentOwner = (entry: NodeTunnelEntry): boolean =>
     hasDurableBinding(entry) && isLiveEntry(entry);
 
+  const readPreparation = (entry: NodeTunnelEntry) =>
+    readWorkerProjectPreparation(
+      options.getEnvironment(entry.environmentId)?.profileSnapshot.project,
+    );
+
   const findNode = async (
     entry: NodeEnvironmentOwner,
     signal: AbortSignal,
@@ -192,7 +198,7 @@ export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOp
 
   const runWorkspaceCommand = async (
     entry: NodeTunnelEntry,
-    command: WorkerWorkspaceCommand & { resetWorkspace?: boolean },
+    command: WorkerWorkspaceCommand & { resetWorkspace?: boolean; sessionKey?: string },
   ): Promise<NodeWorkerWorkspaceExecResult> => {
     const assertCurrent = () => {
       if (!isEnvironmentOwner(entry)) {
@@ -211,10 +217,14 @@ export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOp
       signals.push(command.signal);
     }
     const signal = AbortSignal.any(signals);
+    const preparationKey = readPreparation(entry)?.key;
     const input: NodeWorkerWorkspaceExecInput = {
       gatewayNamespace,
       environmentId: entry.environmentId,
       sessionId: entry.sessionId,
+      // Ordinary paired nodes keep the strict v1 shape. Prepared runtimes are pinned
+      // by their artifact descriptor and require the additional workspace binding.
+      ...(preparationKey === undefined ? {} : { preparationKey, sessionKey: command.sessionKey }),
       generation: entry.ownerEpoch,
       argv: [...command.argv],
       ...(command.input === undefined ? {} : { input: command.input }),
@@ -288,24 +298,29 @@ export function createNodeWorkerTunnelManager(options: NodeWorkerTunnelManagerOp
     const buildLaunchInput = (
       plan: NodeWorkerLaunchInput["descriptor"],
       claim: WorkerSessionTurnClaim,
-    ): NodeWorkerLaunchInput => ({
-      environmentSession: 1,
-      launchId: plan.assignment.turnId,
-      gatewayNamespace,
-      expectedBundleHash: entry.expectedBuild.bundleHash,
-      placementGeneration: claim.placementGeneration,
-      descriptor: plan,
-    });
-    const { validateRestoredWorkspace, ...workspaceActions } = createNodeWorkerWorkspaceActions({
-      environmentId: entry.environmentId,
-      ownerEpoch: entry.ownerEpoch,
-      sessionId: entry.sessionId,
-      ownerSignal: entry.abortController.signal,
-      isOwnerCurrent: () => isLiveEntry(entry),
-      restoredWorkspace,
-      workspaceTransfer: options.workspaceTransfer,
-      runWorkspaceCommand: (command) => runWorkspaceCommand(entry, command),
-    });
+    ): NodeWorkerLaunchInput => {
+      const sessionKey = readPreparation(entry) ? getSessionKey() : undefined;
+      return {
+        environmentSession: 1,
+        launchId: plan.assignment.turnId,
+        gatewayNamespace,
+        expectedBundleHash: entry.expectedBuild.bundleHash,
+        placementGeneration: claim.placementGeneration,
+        ...(sessionKey === undefined ? {} : { sessionKey }),
+        descriptor: plan,
+      };
+    };
+    const { validateRestoredWorkspace, getSessionKey, ...workspaceActions } =
+      createNodeWorkerWorkspaceActions({
+        environmentId: entry.environmentId,
+        ownerEpoch: entry.ownerEpoch,
+        sessionId: entry.sessionId,
+        ownerSignal: entry.abortController.signal,
+        isOwnerCurrent: () => isLiveEntry(entry),
+        restoredWorkspace,
+        workspaceTransfer: options.workspaceTransfer,
+        runWorkspaceCommand: (command) => runWorkspaceCommand(entry, command),
+      });
     const handle: WorkerTurnTunnelHandle = {
       ...workspaceActions,
       environmentId: entry.environmentId,

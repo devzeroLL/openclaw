@@ -44,6 +44,7 @@ function attachedEnvironment() {
     sharedHost: false,
     desktop: null,
     bootstrapReceipt: null,
+    preparation: null,
     ownerEpoch: 7,
     teardownTerminalState: null,
     attachedSessionIds: ["session-1"],

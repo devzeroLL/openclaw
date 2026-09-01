@@ -215,6 +215,7 @@ export function attachedEnvironment(): WorkerTurnEnvironmentRecord {
     providerId: "fake",
     profileId: "development",
     profileSnapshot: { settings: { region: "test" } },
+    preparation: null,
     provisionOperationId: "provision-worker-turn",
     nodeSetupId: null,
     nodeDeviceId: null,

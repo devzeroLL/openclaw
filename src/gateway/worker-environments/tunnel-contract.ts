@@ -63,6 +63,7 @@ export type WorkerWorkspaceCommand = {
 export type WorkerWorkspaceSyncRequest = {
   localPath: string;
   sessionId: string;
+  sessionKey?: string;
   generation: number;
   gitAuthor?: { name?: string; email?: string };
   /** Immutable project identity from the owning environment's provisioning snapshot. */

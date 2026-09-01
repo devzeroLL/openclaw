@@ -603,6 +603,7 @@ describe("sessions.dispatch", () => {
         agentId: "main",
         source,
         target: { kind: "gateway" },
+        setupAuthorized: false,
       },
       expect.any(Function),
       undefined,

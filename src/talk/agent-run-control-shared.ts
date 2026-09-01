@@ -9,8 +9,6 @@ import {
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
-import { isAbortError } from "../infra/abort-signal.js";
-import { formatErrorMessage } from "../infra/errors.js";
 import type { RealtimeVoiceTool } from "./provider-types.js";
 import type { TalkEvent } from "./talk-events.js";
 
@@ -291,15 +289,6 @@ export function buildRealtimeVoiceAgentCancelProviderResult(
     status: "cancelled",
     message,
   };
-}
-
-/** Host cancellation can settle a tool while its voice session remains open. */
-export function buildRealtimeVoiceAgentErrorProviderResult(
-  error: unknown,
-): RealtimeVoiceAgentControlProviderResult | { error: string } {
-  return isAbortError(error)
-    ? buildRealtimeVoiceAgentCancelProviderResult()
-    : { error: formatErrorMessage(error) };
 }
 
 /** Wrap follow-up text so an active run treats it as deferred context. */

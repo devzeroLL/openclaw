@@ -237,7 +237,7 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
     const gatewayGroups = groups.filter((group) =>
       group.shard_name.startsWith("cache-warm:agentic-gateway-methods:"),
     );
-    expect(gatewayGroups.map((group) => group.configs[0]).toSorted()).toEqual([
+    expect(gatewayGroups.flatMap((group) => group.configs).toSorted()).toEqual([
       "test/vitest/vitest.gateway-methods-isolated.config.ts",
       "test/vitest/vitest.gateway-methods.config.ts",
     ]);

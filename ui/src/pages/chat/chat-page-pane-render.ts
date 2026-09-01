@@ -46,10 +46,12 @@ type ChatPagePaneRenderOptions = {
   onSplitRight?: (paneId: string) => void;
   ownerKey: string;
   pane: ChatSplitPane;
+  preparingSessionKey: string | null;
   sessionKeys: readonly string[];
   showGatewayPicker: boolean;
   splitMode: boolean;
   weight: number;
+  visualSessionKey: string;
 };
 
 export function renderChatPagePaneCell(options: ChatPagePaneRenderOptions) {
@@ -70,10 +72,13 @@ export function renderChatPagePaneCell(options: ChatPagePaneRenderOptions) {
           options.sessionKeys,
           (sessionKey) => sessionKey,
           (sessionKey) => {
-            const visible =
-              sessionKey === options.pane.sessionKey ||
-              areUiSessionKeysEquivalent(sessionKey, options.pane.sessionKey);
-            const presented = visible && (!options.narrow || options.active);
+            const selected = areUiSessionKeysEquivalent(sessionKey, options.pane.sessionKey);
+            const visible = areUiSessionKeysEquivalent(sessionKey, options.visualSessionKey);
+            const preparing =
+              options.preparingSessionKey !== null &&
+              areUiSessionKeysEquivalent(sessionKey, options.preparingSessionKey);
+            const presented = (selected || visible) && (!options.narrow || options.active);
+            const interactive = selected && visible && presented;
             const active = options.active && visible;
             const draft = active
               ? routeDraft(options.data, options.consumedDraftData, sessionKey)
@@ -88,19 +93,19 @@ export function renderChatPagePaneCell(options: ChatPagePaneRenderOptions) {
             return html`<openclaw-chat-pane
               class="chat-pane-cache__pane ${visible
                 ? "chat-pane-cache__pane--visible"
-                : ""} ${active ? "chat-pane-cache__pane--active" : ""} ${options.splitMode
-                ? "chat-split-view__pane"
-                : ""}"
+                : ""} ${preparing ? "chat-pane-cache__pane--preparing" : ""} ${active
+                ? "chat-pane-cache__pane--active"
+                : ""} ${options.splitMode ? "chat-split-view__pane" : ""}"
               data-mcp-app-owner-key=${JSON.stringify([options.ownerKey, sessionKey])}
-              aria-hidden=${presented ? "false" : "true"}
-              ?inert=${!presented}
+              aria-hidden=${visible ? "false" : "true"}
+              ?inert=${!interactive}
               .paneId=${options.pane.id}
               .presentationId=${JSON.stringify([options.pane.id, sessionKey])}
               .chatMessagesBySession=${options.chatMessagesBySession}
               .sessionSnapshotStore=${options.sessionSnapshotStore}
               .sessionKey=${sessionKey}
               .presented=${presented}
-              .visuallyPresented=${presented}
+              .visuallyPresented=${visible}
               .active=${active}
               .draft=${draft}
               .focusComposer=${options.draftFocus.shouldFocusPane(

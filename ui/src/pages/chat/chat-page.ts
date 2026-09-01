@@ -628,6 +628,7 @@ export class ChatPage extends OpenClawLightDomElement implements SessionSplitHos
                       paneIndex,
                       "rendered split pane weight",
                     ),
+                    ...this.retainedSessions.presentation(pane),
                   })}
                   ${!this.narrow && paneIndex < column.panes.length - 1
                     ? html`

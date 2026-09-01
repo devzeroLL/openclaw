@@ -22,6 +22,7 @@ import type { TalkEvent } from "./talk-events.js";
 export {
   buildRealtimeVoiceAgentCancelProviderResult,
   buildRealtimeVoiceAgentControlSpeechMessage,
+  buildRealtimeVoiceAgentErrorProviderResult,
   classifyRealtimeVoiceAgentControlText,
   normalizeRealtimeVoiceAgentControlMode,
   parseRealtimeVoiceAgentControlToolArgs,

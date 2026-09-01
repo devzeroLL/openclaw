@@ -10,6 +10,7 @@ import {
 } from "openclaw/plugin-sdk/number-runtime";
 import {
   buildRealtimeVoiceAgentConsultWorkingResponse,
+  buildRealtimeVoiceAgentErrorProviderResult,
   calculateMulawRms,
   createRealtimeVoiceSessionHarness,
   createSpeechThresholdGate,
@@ -1676,8 +1677,11 @@ export class RealtimeCallHandler {
       );
     } catch (error) {
       if (!state.cancelled) {
-        console.warn(
-          `[voice-call] realtime forced agent consult failed callId=${params.callId} providerCallId=${params.callSid} error=${formatErrorMessage(error)}`,
+        const result = buildRealtimeVoiceAgentErrorProviderResult(error);
+        const failed = "error" in result;
+        const report = failed ? console.warn : console.log;
+        report(
+          `[voice-call] realtime forced agent consult ${failed ? "failed" : "cancelled"} callId=${params.callId} providerCallId=${params.callSid}${failed ? ` error=${result.error}` : ""}`,
         );
       }
     } finally {
@@ -1899,9 +1903,9 @@ export class RealtimeCallHandler {
           return;
         }
         forcedConsult.sendSpeechPrompt = false;
-        const result = await forcedConsult.promise.catch((error: unknown) => ({
-          error: formatErrorMessage(error),
-        }));
+        const result = await forcedConsult.promise.catch(
+          buildRealtimeVoiceAgentErrorProviderResult,
+        );
         if (
           forcedConsult.cancelled ||
           forcedConsult.owner !== bridge ||
@@ -1975,9 +1979,7 @@ export class RealtimeCallHandler {
             ? { error: `Tool "${name}" not available` }
             : await handler(handlerArgs, callId, context);
         } catch (error) {
-          return {
-            error: formatErrorMessage(error),
-          };
+          return buildRealtimeVoiceAgentErrorProviderResult(error);
         }
       })().then(completeConsult);
       try {
@@ -1986,10 +1988,7 @@ export class RealtimeCallHandler {
           return;
         }
         const result = outcome.result;
-        const status =
-          result && typeof result === "object" && !Array.isArray(result) && "error" in result
-            ? "error"
-            : "ok";
+        const status = hasResultError(result) ? "error" : "ok";
         const error =
           status === "error" && result && typeof result === "object" && !Array.isArray(result)
             ? formatErrorMessage((result as { error?: unknown }).error ?? "unknown")
@@ -2018,19 +2017,10 @@ export class RealtimeCallHandler {
     const context = {
       partialUserTranscript: this.resolveUserTranscriptContext(callId, userTranscriptOwner),
     };
-    const handlerArgs =
-      name === REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME
-        ? withFallbackConsultQuestion(args, context.partialUserTranscript)
-        : args;
     const result = !handler
       ? { error: `Tool "${name}" not available` }
-      : await handler(handlerArgs, callId, context).catch((error: unknown) => ({
-          error: formatErrorMessage(error),
-        }));
-    const status =
-      result && typeof result === "object" && !Array.isArray(result) && "error" in result
-        ? "error"
-        : "ok";
+      : await handler(args, callId, context).catch(buildRealtimeVoiceAgentErrorProviderResult);
+    const status = hasResultError(result) ? "error" : "ok";
     const error =
       status === "error" && result && typeof result === "object" && !Array.isArray(result)
         ? formatErrorMessage((result as { error?: unknown }).error ?? "unknown")
@@ -2039,9 +2029,6 @@ export class RealtimeCallHandler {
       `[voice-call] realtime tool call completed callId=${callId} tool=${name} status=${status} elapsedMs=${Date.now() - startedAt}${error ? ` error=${error}` : ""}`,
     );
     await submitFinalToolResult(result);
-    if (name === REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME && status === "ok") {
-      this.consumePartialUserTranscript(callId, userTranscriptOwner, context.partialUserTranscript);
-    }
   }
 }
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */
